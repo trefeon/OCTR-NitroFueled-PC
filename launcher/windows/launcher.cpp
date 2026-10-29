@@ -52,6 +52,7 @@
 #include "nat_check.h"
 #include "port_update.h"
 #include "settings_import.h"
+#include "launcher_paths.h"
 #include "discord_presence.h"
 #include "launcher_locales.h"
 
@@ -673,7 +674,7 @@ struct DlcInfo {
     bool ok = false;
 };
 
-enum class Job { None, Merge, Check, Play };
+enum class Job { None, Merge, Check, Play, PkgImport };
 
 struct App {
     HWND hwnd = nullptr;
@@ -699,6 +700,10 @@ struct App {
     std::thread worker;
     std::mutex mutex;  // guards the strings below and log
     std::string job_error;
+    // PKG import: scripts/pkg_import.py runs as a child with piped output.
+    HANDLE pkg_import_process = nullptr;
+    std::vector<std::string> pkg_import_log;  // guarded by mutex
+    std::string pkg_import_staging, pkg_import_merged;  // guarded by mutex
     std::atomic<size_t> merge_done{0}, merge_total{0};
     std::atomic<bool> job_finished{false};
 
@@ -1547,6 +1552,117 @@ void StartMerge(std::vector<fs::path> sources) {
     });
 }
 
+fs::path DlcRoot();  // the configured DLC folder (defined with the DLC tab)
+bool UpdateBusy();     // whether the updater is working (defined with the updater tab)
+
+/// A PKG folder (one CUSA13795 base, one 1.21 update, optional matching DLC) -> a new validated
+/// install, via scripts/pkg_import.py as a child process with streamed output. Cancellation
+/// terminates the child; the script (or the launcher, via STAGING=) removes only this import's
+/// staging directory. Failure never touches the current game folder; success switches to the new
+/// merged directory only after game_check.py accepts it.
+void StartPkgImport(const fs::path& pkg_dir, const fs::path& dest_dir) {
+    App& a = g_app;
+    if (!a.python || a.job != Job::None || UpdateBusy()) return;
+    JoinWorker();
+    a.job = Job::PkgImport;
+    a.job_finished = false;
+    {
+        std::scoped_lock lock{a.mutex};
+        a.job_error.clear();
+        a.pkg_import_log.clear();
+        a.pkg_import_staging.clear();
+        a.pkg_import_merged.clear();
+    }
+    const fs::path script = LauncherPaths::PkgImportPaths::Script(a.root);
+    std::wstring cmd =
+        Quote(a.python->exe) + L" " + a.python->args + L"-X utf8 " + Quote(script.wstring()) + L" " +
+        Quote(pkg_dir.wstring()) + L" " + Quote(dest_dir.wstring()) + L" --extractor " +
+        Quote(LauncherPaths::PkgImportPaths::Extractor(a.root).wstring()) + L" --dlc-dir " +
+        Quote(DlcRoot().wstring());
+    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+    HANDLE read = nullptr, write = nullptr;
+    if (!CreatePipe(&read, &write, &sa, 0)) {
+        std::scoped_lock lock{a.mutex};
+        a.job_error = "Could not start the PKG import.";
+        a.job_finished = true;
+        return;
+    }
+    SetHandleInformation(read, HANDLE_FLAG_INHERIT, 0);
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = nul;
+    si.hStdOutput = write;
+    si.hStdError = write;
+    PROCESS_INFORMATION pi{};
+    const BOOL ok = CreateProcessW(a.python->exe.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+                                   nullptr, a.root.c_str(), &si, &pi);
+    CloseHandle(write);
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    if (!ok) {
+        CloseHandle(read);
+        std::scoped_lock lock{a.mutex};
+        a.job_error = "Could not start Python (error " + std::to_string(GetLastError()) + ")";
+        a.job_finished = true;
+        return;
+    }
+    CloseHandle(pi.hThread);
+    a.pkg_import_process = pi.hProcess;
+    a.worker = std::thread([read] {
+        App& app = g_app;
+        std::string pending;
+        char buf[4096];
+        DWORD n = 0;
+        while (ReadFile(read, buf, sizeof buf, &n, nullptr) && n) {
+            pending.append(buf, n);
+            size_t nl;
+            while ((nl = pending.find('\n')) != std::string::npos) {
+                const std::string line = Trim(pending.substr(0, nl));
+                pending.erase(0, nl + 1);
+                if (line.empty()) continue;
+                std::scoped_lock lock{app.mutex};
+                if (line.rfind("STAGING=", 0) == 0) app.pkg_import_staging = line.substr(8);
+                else if (line.rfind("MERGED_DIR=", 0) == 0) app.pkg_import_merged = line.substr(11);
+                app.pkg_import_log.push_back(line);
+                if (app.pkg_import_log.size() > 200)
+                    app.pkg_import_log.erase(app.pkg_import_log.begin());
+            }
+        }
+        if (!pending.empty()) {
+            const std::string line = Trim(pending);
+            if (!line.empty()) {
+                std::scoped_lock lock{app.mutex};
+                app.pkg_import_log.push_back(line);
+            }
+        }
+        CloseHandle(read);
+        DWORD code = 1;
+        GetExitCodeProcess(app.pkg_import_process, &code);
+        {
+            std::scoped_lock lock{app.mutex};
+            if (code != 0) {
+                std::string tail = app.pkg_import_log.empty() ? "" : app.pkg_import_log.back();
+                for (auto it = app.pkg_import_log.rbegin(); it != app.pkg_import_log.rend(); ++it) {
+                    if (it->rfind("ERROR", 0) == 0) {
+                        tail = *it;
+                        break;
+                    }
+                }
+                app.job_error =
+                    tail.empty() ? ("PKG import failed (exit " + std::to_string(code) + ")") : tail;
+            }
+        }
+        app.job_finished = true;
+    });
+}
+
+void StopPkgImport() {
+    App& a = g_app;
+    if (a.job != Job::PkgImport) return;
+    if (a.pkg_import_process) TerminateProcess(a.pkg_import_process, 1);
+}
+
 /// The European edition is chosen (its languages differ from the Americas build's).
 bool IsEuGame() { return GameTitle() == L"CUSA14876"; }
 
@@ -1993,6 +2109,39 @@ void PollJobs() {
             StartCheck();
         } else {
             a.notice = error;
+        }
+    } else if (finished == Job::PkgImport) {
+        std::string error, merged, staging;
+        {
+            std::scoped_lock lock{a.mutex};
+            error = a.job_error;
+            merged = a.pkg_import_merged;
+            staging = a.pkg_import_staging;
+        }
+        if (a.pkg_import_process) {
+            CloseHandle(a.pkg_import_process);
+            a.pkg_import_process = nullptr;
+        }
+        if (error.empty() && !merged.empty()) {
+            a.game_dir = TextPath(merged);
+            a.game_info = Analyze(a.game_dir);
+            a.notice.clear();
+            SaveLauncher();  // on failure its notice stays: the validated install is kept, path below
+            if (a.notice.empty()) {
+                a.notice = std::string(T("Juego importado: ", "Game imported: ")) + merged;
+            } else {
+                a.notice += std::string(T(" El juego importado se conserva en: ",
+                                          " The imported game is kept at: ")) +
+                            merged;
+            }
+            a.dlc_dirty = true;
+            StartCheck();
+        } else {
+            if (!staging.empty()) {
+                std::error_code ec;
+                fs::remove_all(TextPath(staging), ec);
+            }
+            a.notice = error.empty() ? std::string(T("Falló la importación.", "Import failed.")) : error;
         }
     } else if (finished == Job::Play) {
         CloseHandle(a.process);
@@ -2703,6 +2852,35 @@ void PlayTab() {
         ImGui::Spacing();
         if (ImGui::Button(T("Ya tengo el juego preparado...", "I already have the merged game...")) && !busy) {
             ChooseFolder(a.game_dir, a.game_info, L"CUSA13795-1.21");
+        }
+        ImGui::Spacing();
+        if (a.job == Job::PkgImport) {
+            ImGui::TextColored(kYellow, "%s", T("Importando PKGs...", "Importing PKGs..."));
+            std::string last;
+            {
+                std::scoped_lock lock{a.mutex};
+                if (!a.pkg_import_log.empty()) last = a.pkg_import_log.back();
+            }
+            if (!last.empty()) ImGui::TextColored(kGrey, "%s", last.c_str());
+            if (ImGui::Button(T("Cancelar", "Cancel"))) StopPkgImport();
+        } else {
+            ImGui::BeginDisabled(busy || !a.python);
+            if (ImGui::Button(T("Importar carpeta de PKGs...", "Import PKG folder..."))) {
+                if (const auto pkgs =
+                        PickFolder(a.hwnd, L"Carpeta con los .pkg de CUSA13795", a.root)) {
+                    if (const auto dest =
+                            PickFolder(a.hwnd, L"Biblioteca de juegos / Game library", a.root)) {
+                        StartPkgImport(*pkgs, *dest);
+                    }
+                }
+            }
+            ImGui::EndDisabled();
+            HelpMarker(T("Importa tus PKGs de CUSA13795 (base + actualización 1.21, DLC opcionales): se extraen en "
+                         "una carpeta temporal, se comprueban y solo entonces se instalan en una carpeta nueva de "
+                         "la biblioteca. Los DLC se copian sin extraer. Puedes cancelar mientras se importan.",
+                         "Imports your CUSA13795 PKGs (base + 1.21 update, optional DLC): they are extracted to a "
+                         "temporary folder, validated, and only then installed into a new library folder. DLC is "
+                         "copied without extracting. You can cancel while importing."));
         }
     }
 
@@ -7319,6 +7497,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         g_update.worker.join();
     }
     // Background work finishes on its own; a running game keeps running.
+    if (g_app.job == Job::PkgImport && g_app.pkg_import_process)
+        TerminateProcess(g_app.pkg_import_process, 1);
     if (g_app.worker.joinable()) {
         if (g_app.job == Job::Play) g_app.worker.detach();
         else g_app.worker.join();
