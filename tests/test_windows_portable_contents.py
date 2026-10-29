@@ -133,6 +133,12 @@ class WindowsPortableContents(unittest.TestCase):
             self.assertIn("shadps4plus-pkg", third_party)
             self.assertIn("zlib1.dll", third_party)
             self.assertIn("libc++.dll", third_party)
+            # Runtime attribution stays true for the CLANG_BIN fallback: the out\ copies
+            # are MSYS2 CLANG64 dependencies next to the extractor, distinct from bin\.
+            self.assertIn("MSYS2 CLANG64", third_party)
+            self.assertIn("out\\zlib1.dll", third_party)
+            self.assertIn("not these separate out\\", third_party)
+            self.assertNotIn("copies of the MSYS2 packages listed", third_party)
 
     def test_portable_excludes_pkgs_game_and_user_data(self):
         with tempfile.TemporaryDirectory() as temp:

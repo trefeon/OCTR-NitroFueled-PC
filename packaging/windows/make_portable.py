@@ -162,8 +162,10 @@ def third_party(dlls, python=None, dlss=False):
               '           plus patches\\pkg-extractor-0x403-tail.patch in this repository',
               '  pin:     third_party\\shadps4plus-pkg.README.CTR.md in this repository',
               '           (licenses\\shadps4plus-pkg.README.CTR.md in this package)',
-              '  runtime: out\\zlib1.dll, out\\libc++.dll (copies of the MSYS2 packages listed',
-              '           above; kept next to the extractor so it loads outside bin\\)).', '']
+              '  runtime: out\\zlib1.dll, out\\libc++.dll (MSYS2 CLANG64 runtime dependencies of',
+              '           the extractor, copied next to it so it loads outside bin\\; the bin\\',
+              '           package list above covers the DLL closure, not these separate out\\',
+              '           copies).', '']
     lines += ['sacredfire.exe includes AMD FidelityFX FSR 3.1 (MIT, through',
               'https://github.com/FireBurn/FSR-Vulkan).', '']
     lines += [f'The launcher ({PACKAGED_LAUNCHER}) and sacredfire.exe include Dear ImGui (MIT,',

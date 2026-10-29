@@ -132,7 +132,7 @@ need them.
 
 `packaging/windows/make_portable.py` makes the portable ZIP (the file in Releases) from a finished
 build: `sacredfire.exe`, the DLLs it needs (found with `llvm-objdump`), the scripts
-(`scripts\pkg_import.py` included), default `bbport.ini` (windowed, 60 FPS limit), launchers with
+(`scripts\pkg_import.py` included), default `bbport.default.ini` (windowed, 60 FPS limit), launchers with
 CRLF line endings, `LICENSE` and a `THIRD-PARTY.txt` that names the MSYS2 package and license of
 every DLL. It also bundles the PKG import extractor: `out\pkg_extractor.exe` (where the launcher
 expects it) with `out\zlib1.dll` and `out\libc++.dll`, plus the shadPS4Plus GPL notice and the
