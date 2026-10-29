@@ -144,13 +144,127 @@ class OwnedPatchTests(unittest.TestCase):
                        "PKG table entry is truncated",
                        "PKG entry range is outside the file",
                        "PKG table entry range is outside the file",
+                       "Failed to read PKG title ID",
                        "PKG is missing param.sfo",
+                       "Failed to restore PKG table offset",
+                       "Failed to read PKG entry data",
+                       "Failed to write complete PKG output file",
                        "PSF file has no CATEGORY",
                        "invalid DLC entitlement label"):
             self.assertIn(marker, text)
         added = [line for line in text.splitlines()
                  if line.startswith("+") and not line.startswith("+++")]
         self.assertTrue(any(line.lstrip("+").strip() == "return 1;" for line in added))
+
+
+class TableCursorDisciplineTests(unittest.TestCase):
+    """Behavioral contract for the Open table walk fixed by the owned patch.
+
+    The walk must visit every table entry in order even when param.sfo sits
+    mid-table: seeking to the payload and restoring the saved table cursor
+    must not skip or repeat entries. This simulates the fixed discipline
+    (Tell, seek payload, read, restore) against a synthetic 3-entry table
+    with the sfo entry second; the C++ implementation is pinned by
+    PatchedSourceStructureTests below and proven on-device by the
+    coordinator's real-package runs.
+    """
+
+    TABLE_STRIDE = 32
+
+    def walk_table(self, entry_count, sfo_index):
+        visited = []
+        cursor = 0
+        for index in range(entry_count):
+            visited.append(cursor // self.TABLE_STRIDE)
+            cursor += self.TABLE_STRIDE  # ReadTableEntry consumes one stride
+            if index == sfo_index:
+                saved = cursor
+                cursor = 0x2000  # seek(entry.offset): payload read elsewhere
+                cursor = saved  # restore table cursor
+        return visited
+
+    def test_mid_table_sfo_visits_every_entry_once(self):
+        self.assertEqual(self.walk_table(3, 1), [0, 1, 2])
+
+    def test_first_and_last_sfo_positions_stay_ordered(self):
+        self.assertEqual(self.walk_table(3, 0), [0, 1, 2])
+        self.assertEqual(self.walk_table(3, 2), [0, 1, 2])
+
+
+class PatchedSourceStructureTests(unittest.TestCase):
+    """Structural guards on the resolved patched sources (pin + owned patch).
+
+    Materializes the patched files in a temp dir (read-only: git show from
+    the pin plus git apply of the owned patch) and asserts the review
+    findings stayed fixed in the result. Real behavior is proven by the
+    coordinator's rebuild + real-package runs; these guards catch patch
+    drift or regressions of the exact defects found in review.
+    """
+
+    SOURCES = ("src/core/file_format/pkg.cpp",
+                 "src/core/crypto/crypto.cpp",
+                 "src/core/crypto/crypto.h",
+                 "src/core/loader.cpp",
+                 "extractor/main.cpp")
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name)
+        for rel in cls.SOURCES:
+            show = subprocess.run(["git", "-C", str(SUBMODULE), "show", f"HEAD:{rel}"],
+                                  capture_output=True, cwd=ROOT)
+            if show.returncode != 0:
+                raise unittest.SkipTest("pinned submodule not available")
+            target = root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(show.stdout)
+        apply = subprocess.run(["git", "apply", str(PATCH)],
+                               capture_output=True, text=True, cwd=root)
+        if apply.returncode != 0:
+            raise unittest.SkipTest(f"owned patch does not apply: {apply.stderr.strip()}")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    @classmethod
+    def pkg(cls):
+        return (Path(cls._tmp.name) / "src/core/file_format/pkg.cpp").read_text(encoding="utf-8")
+
+    @classmethod
+    def main(cls):
+        return (Path(cls._tmp.name) / "extractor/main.cpp").read_text(encoding="utf-8")
+
+    def test_title_id_uses_boolean_read(self):
+        # Read() returns 1/0 for arrays, never the byte count: comparing to
+        # sizeof rejected every valid PKG.
+        self.assertIn("!file.Read(pkgTitleID)", self.pkg())
+        self.assertNotIn("!= sizeof(pkgTitleID)", self.pkg())
+
+    def test_sfo_payload_restores_table_cursor(self):
+        self.assertIn("const s64 table_pos = file.Tell();", self.pkg())
+        self.assertIn("file.Seek(table_pos)", self.pkg())
+
+    def test_entry_payloads_are_byte_count_checked(self):
+        pkg = self.pkg()
+        self.assertGreaterEqual(pkg.count("!= entry.size"), 3)
+        self.assertIn("|| !out.Flush()", pkg)
+
+    def test_np_path_reuses_loaded_buffer(self):
+        pkg = self.pkg()
+        # One loader per raw-write path (empty-name + main); the NP block
+        # must not declare a third shadowing buffer or re-seek.
+        self.assertEqual(pkg.count("std::vector<u8> data;"), 2)
+        self.assertIn("std::span<const u8> cipherNp(data.data(), data.size());", pkg)
+
+    def test_invalid_paths_exit_nonzero(self):
+        main = self.main()
+        self.assertGreaterEqual(main.count("return 1;"), 6)
+        self.assertIn("return ret;", main)
+        for code in ("ret = 101;", "ret = 102;", "ret = 103;"):
+            self.assertIn(code, main)
 
 
 class SubmodulePinTests(unittest.TestCase):

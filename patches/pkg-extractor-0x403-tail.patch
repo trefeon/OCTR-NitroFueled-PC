@@ -140,7 +140,7 @@ index b5d8104..a47f129 100644
                       std::span<CryptoPP::byte, 16> NPcommID, std::span<CryptoPP::byte, 16> efsmIv,
                       std::span<CryptoPP::byte> ciphertext, std::span<CryptoPP::byte> decrypted);
 diff --git a/src/core/file_format/pkg.cpp b/src/core/file_format/pkg.cpp
-index 8ff698f..b144602 100644
+index 8ff698f..dee0451 100644
 --- a/src/core/file_format/pkg.cpp
 +++ b/src/core/file_format/pkg.cpp
 @@ -1,7 +1,10 @@
@@ -237,16 +237,19 @@ index 8ff698f..b144602 100644
 -    file.Seek(0x47); // skip first 7 characters of content_id
 -    file.Read(pkgTitleID);
 +    // (skip first 7 characters of content_id).
-+    if (!file.Seek(0x47) || file.Read(pkgTitleID) != sizeof(pkgTitleID)) {
++    if (!file.Seek(0x47) || !file.Read(pkgTitleID)) {
 +        failreason = "Failed to read PKG title ID";
 +        return false;
 +    }
  
      u32 offset = pkgheader.pkg_table_entry_offset;
      u32 n_files = pkgheader.pkg_table_entry_count;
-@@ -77,13 +139,9 @@ bool PKG::Open(const std::filesystem::path& filepath, std::string& failreason) {
+@@ -75,28 +137,38 @@ bool PKG::Open(const std::filesystem::path& filepath, std::string& failreason) {
+         return false;
+     }
  
-     for (int i = 0; i < n_files; i++) {
+-    for (int i = 0; i < n_files; i++) {
++    for (u32 i = 0; i < n_files; i++) {
          PKGEntry entry{};
 -        file.Read(entry.id);
 -        file.Read(entry.filename_offset);
@@ -261,13 +264,22 @@ index 8ff698f..b144602 100644
  
          // Try to figure out the name
          const auto name = GetEntryNameByType(entry.id);
-@@ -94,9 +152,17 @@ bool PKG::Open(const std::filesystem::path& filepath, std::string& failreason) {
+         if (name == "param.sfo") {
+             sfo.clear();
++            const s64 table_pos = file.Tell();
+             if (!file.Seek(entry.offset)) {
+                 failreason = "Failed to seek to param.sfo offset";
                  return false;
              }
              sfo.resize(entry.size);
 -            file.ReadRaw<u8>(sfo.data(), entry.size);
 +            if (file.ReadRaw<u8>(sfo.data(), entry.size) != entry.size) {
 +                failreason = "param.sfo entry is truncated";
++                sfo.clear();
++                return false;
++            }
++            if (!file.Seek(table_pos)) {
++                failreason = "Failed to restore PKG table offset";
 +                sfo.clear();
 +                return false;
 +            }
@@ -280,7 +292,7 @@ index 8ff698f..b144602 100644
      file.Close();
  
      return true;
-@@ -111,19 +177,31 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
+@@ -111,19 +183,31 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
          return false;
      }
      pkgSize = file.GetSize();
@@ -316,9 +328,12 @@ index 8ff698f..b144602 100644
  
      u32 offset = pkgheader.pkg_table_entry_offset;
      u32 n_files = pkgheader.pkg_table_entry_count;
-@@ -141,13 +219,9 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
+@@ -139,15 +223,11 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
+         return false;
+     }
  
-     for (int i = 0; i < n_files; i++) {
+-    for (int i = 0; i < n_files; i++) {
++    for (u32 i = 0; i < n_files; i++) {
          PKGEntry entry{};
 -        file.Read(entry.id);
 -        file.Read(entry.filename_offset);
@@ -333,7 +348,39 @@ index 8ff698f..b144602 100644
  
          auto currentPos = file.Tell();
  
-@@ -223,11 +297,18 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
+@@ -167,8 +247,14 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
+ 
+             std::vector<u8> data;
+             data.resize(entry.size);
+-            file.ReadRaw<u8>(data.data(), entry.size);
+-            out.WriteRaw<u8>(data.data(), entry.size);
++            if (file.ReadRaw<u8>(data.data(), entry.size) != entry.size) {
++                failreason = "Failed to read PKG entry data";
++                return false;
++            }
++            if (out.WriteRaw<u8>(data.data(), entry.size) != entry.size || !out.Flush()) {
++                failreason = "Failed to write complete PKG output file";
++                return false;
++            }
+             out.Close();
+ 
+             file.Seek(currentPos);
+@@ -216,35 +302,42 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
+ 
+         std::vector<u8> data;
+         data.resize(entry.size);
+-        file.ReadRaw<u8>(data.data(), entry.size);
+-        out.WriteRaw<u8>(data.data(), entry.size);
++        if (file.ReadRaw<u8>(data.data(), entry.size) != entry.size) {
++            failreason = "Failed to read PKG entry data";
++            return false;
++        }
++        if (out.WriteRaw<u8>(data.data(), entry.size) != entry.size || !out.Flush()) {
++            failreason = "Failed to write complete PKG output file";
++            return false;
++        }
+         out.Close();
+ 
          // Decrypt Np stuff and overwrite.
          if (entry.id == 0x400 || entry.id == 0x401 || entry.id == 0x402 ||
              entry.id == 0x403) { // somehow 0x401 is not decrypting
@@ -342,6 +389,8 @@ index 8ff698f..b144602 100644
 -			if(msize%16 != 0)
 -				msize = msize - msize%16 + 16;
 -            decNp.resize(msize);
+-            if (!file.Seek(entry.offset)) {
+-                failreason = "Failed to seek to PKG entry offset";
 +            // CTR (CUSA13795): entry 0x403 (npbind.dat) is 0x214 bytes, so
 +            // its size is not AES block aligned. Decrypt the largest aligned
 +            // prefix and carry the short tail through verbatim; every other
@@ -351,17 +400,17 @@ index 8ff698f..b144602 100644
 +            const bool np_short_tail = entry.id == 0x403 && np_remainder != 0;
 +            if (!np_short_tail && np_remainder != 0) {
 +                failreason = "Encrypted PKG entry size is not AES block aligned";
-+                return false;
-+            }
-+            decNp.resize(np_size);
-             if (!file.Seek(entry.offset)) {
-                 failreason = "Failed to seek to PKG entry offset";
                  return false;
-@@ -237,14 +318,15 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
-             data.resize(entry.size);
-             file.ReadRaw<u8>(data.data(), entry.size);
- 
+             }
+-
+-            std::vector<u8> data;
+-            data.resize(entry.size);
+-            file.ReadRaw<u8>(data.data(), entry.size);
+-
 -            std::span<u8> cipherNp(data.data(), msize);
++            decNp.resize(np_size);
++            // Reuses the entry payload already loaded (and byte-count
++            // checked) above; no second seek/read into a shadowing buffer.
 +            std::span<const u8> cipherNp(data.data(), data.size());
              std::array<u8, 64> concatenated_ivkey_dk3_;
              std::memcpy(concatenated_ivkey_dk3_.data(), &entry, sizeof(entry));
