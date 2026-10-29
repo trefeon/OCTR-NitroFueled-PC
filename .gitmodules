@@ -16,3 +16,7 @@
 [submodule "gpu/third_party/xbyak"]
 	path = gpu/third_party/xbyak
 	url = https://github.com/herumi/xbyak.git
+[submodule "third_party/shadps4plus-pkg"]
+	path = third_party/shadps4plus-pkg
+	url = https://github.com/trefeon/shadPS4Plus.git
+	branch = ShadPs4Plus

@@ -23,11 +23,23 @@ MINGW*|MSYS*)
     cmake -S gpu -B out/gpu-win -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO=off \
         -DBB_LTO="${BB_LTO:-OFF}" -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ >/dev/null
     echo "GPU library and loader: LTO ${BB_LTO:-OFF}"
-    if ! ninja -C out/gpu-win sacredfire bb-gpu-capabilities ctr-launcher > out/gpu-build.log 2>&1; then
+    # CTR PKG import (Task 1): build the pinned pkg_extractor alongside the
+    # loader when its submodule is checked out (see gpu/CMakeLists.txt; the
+    # target no-ops with a STATUS skip when sources are absent).
+    extractor_targets=()
+    if [[ -f third_party/shadps4plus-pkg/extractor/main.cpp ]]; then
+        extractor_targets+=(pkg_extractor)
+    else
+        echo 'pkg_extractor skipped: third_party/shadps4plus-pkg not checked out' >&2
+    fi
+    if ! ninja -C out/gpu-win sacredfire bb-gpu-capabilities ctr-launcher "${extractor_targets[@]}" > out/gpu-build.log 2>&1; then
         grep -v '^\[' out/gpu-build.log | tail -40 >&2
         echo 'Build failed (full log: out/gpu-build.log)' >&2; exit 1
     fi
     cp out/gpu-win/sacredfire.exe out/gpu-win/bb-gpu-capabilities.exe out/gpu-win/CTR-NitroFueled-PC.exe out/
+    if [[ -f out/gpu-win/pkg_extractor.exe ]]; then
+        cp out/gpu-win/pkg_extractor.exe out/pkg_extractor.exe
+    fi
     # BB_VERSION names a build before its release tag exists (BB_VERSION=v0.5 bash build.sh).
     version=${BB_VERSION:-$(git describe --tags --match 'v*' --always 2>/dev/null || echo unknown)}
     printf '%s-windows\n' "$version" > out/VERSION

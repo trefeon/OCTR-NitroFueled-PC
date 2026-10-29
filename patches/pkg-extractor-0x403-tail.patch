@@ -1,0 +1,123 @@
+diff --git a/src/core/crypto/crypto.cpp b/src/core/crypto/crypto.cpp
+index 4020edf..ce45053 100644
+--- a/src/core/crypto/crypto.cpp
++++ b/src/core/crypto/crypto.cpp
+@@ -1,7 +1,9 @@
+ // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <algorithm>
+ #include <array>
++#include <cstddef>
+ 
+ #include "crypto.h"
+ 
+@@ -138,6 +140,35 @@ void Crypto::aesCbcCfb128DecryptEntry(std::span<const CryptoPP::byte, 32> ivkey,
+     }
+ }
+ 
++size_t Crypto::aesCbcCfb128DecryptEntryBounded(std::span<const CryptoPP::byte, 32> ivkey,
++                                               std::span<const CryptoPP::byte> ciphertext,
++                                               std::span<CryptoPP::byte> decrypted) {
++    // CTR (CUSA13795) 0x403 tail fix: decrypt only the largest AES-block-aligned
++    // prefix and report how many bytes were block-decrypted. The caller carries
++    // any short (< BLOCKSIZE) remainder through verbatim, so neither span is
++    // ever read or written past its size (the baseline rounded the cipher span
++    // UP past the end of the data buffer).
++    const size_t limit = std::min(ciphertext.size(), decrypted.size());
++    const size_t full = limit & ~(CryptoPP::AES::BLOCKSIZE - 1);
++    if (full == 0) {
++        return 0;
++    }
++    std::array<CryptoPP::byte, CryptoPP::AES::DEFAULT_KEYLENGTH> key;
++    std::array<CryptoPP::byte, CryptoPP::AES::DEFAULT_KEYLENGTH> iv;
++
++    std::copy(ivkey.begin() + 16, ivkey.begin() + 16 + key.size(), key.begin());
++    std::copy(ivkey.begin(), ivkey.begin() + iv.size(), iv.begin());
++
++    CryptoPP::AES::Decryption aesDecryption(key.data(), CryptoPP::AES::DEFAULT_KEYLENGTH);
++    CryptoPP::CBC_Mode_ExternalCipher::Decryption cbcDecryption(aesDecryption, iv.data());
++
++    for (size_t i = 0; i < full; i += CryptoPP::AES::BLOCKSIZE) {
++        cbcDecryption.ProcessData(decrypted.data() + i, ciphertext.data() + i,
++                                  CryptoPP::AES::BLOCKSIZE);
++    }
++    return full;
++}
++
+ void Crypto::decryptEFSM(std::span<CryptoPP::byte, 16> trophyKey,
+                          std::span<CryptoPP::byte, 16> NPcommID,
+                          std::span<CryptoPP::byte, 16> efsmIv, std::span<CryptoPP::byte> ciphertext,
+diff --git a/src/core/crypto/crypto.h b/src/core/crypto/crypto.h
+index b5d8104..a47f129 100644
+--- a/src/core/crypto/crypto.h
++++ b/src/core/crypto/crypto.h
+@@ -32,6 +32,12 @@ public:
+     void aesCbcCfb128DecryptEntry(std::span<const CryptoPP::byte, 32> ivkey,
+                                   std::span<CryptoPP::byte> ciphertext,
+                                   std::span<CryptoPP::byte> decrypted);
++    // Bounds-safe NP-entry decrypt for the 0x403 short tail: decrypts at most
++    // the largest block-aligned prefix shared by both spans and returns that
++    // prefix length; the caller preserves the remainder verbatim.
++    size_t aesCbcCfb128DecryptEntryBounded(std::span<const CryptoPP::byte, 32> ivkey,
++                                           std::span<const CryptoPP::byte> ciphertext,
++                                           std::span<CryptoPP::byte> decrypted);
+     void decryptEFSM(std::span<CryptoPP::byte, 16> trophyKey,
+                      std::span<CryptoPP::byte, 16> NPcommID, std::span<CryptoPP::byte, 16> efsmIv,
+                      std::span<CryptoPP::byte> ciphertext, std::span<CryptoPP::byte> decrypted);
+diff --git a/src/core/file_format/pkg.cpp b/src/core/file_format/pkg.cpp
+index 8ff698f..a0a7c71 100644
+--- a/src/core/file_format/pkg.cpp
++++ b/src/core/file_format/pkg.cpp
+@@ -2,6 +2,8 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <iostream>
++#include <algorithm>
++#include <cstddef>
+ #include <zlib.h>
+ #include "common/io_file.h"
+ #include "core/file_format/pkg.h"
+@@ -223,11 +225,18 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
+         // Decrypt Np stuff and overwrite.
+         if (entry.id == 0x400 || entry.id == 0x401 || entry.id == 0x402 ||
+             entry.id == 0x403) { // somehow 0x401 is not decrypting
+-			int rsize = entry.size;
+-			int msize = entry.size;
+-			if(msize%16 != 0)
+-				msize = msize - msize%16 + 16;
+-            decNp.resize(msize);
++            // CTR (CUSA13795): entry 0x403 (npbind.dat) is 0x214 bytes, so
++            // its size is not AES block aligned. Decrypt the largest aligned
++            // prefix and carry the short tail through verbatim; every other
++            // encrypted NP entry must stay block aligned.
++            const size_t np_size = entry.size;
++            const size_t np_remainder = np_size % CryptoPP::AES::BLOCKSIZE;
++            const bool np_short_tail = entry.id == 0x403 && np_remainder != 0;
++            if (!np_short_tail && np_remainder != 0) {
++                failreason = "Encrypted PKG entry size is not AES block aligned";
++                return false;
++            }
++            decNp.resize(np_size);
+             if (!file.Seek(entry.offset)) {
+                 failreason = "Failed to seek to PKG entry offset";
+                 return false;
+@@ -237,14 +246,15 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
+             data.resize(entry.size);
+             file.ReadRaw<u8>(data.data(), entry.size);
+ 
+-            std::span<u8> cipherNp(data.data(), msize);
++            std::span<const u8> cipherNp(data.data(), data.size());
+             std::array<u8, 64> concatenated_ivkey_dk3_;
+             std::memcpy(concatenated_ivkey_dk3_.data(), &entry, sizeof(entry));
+             std::memcpy(concatenated_ivkey_dk3_.data() + sizeof(entry), dk3_.data(), sizeof(dk3_));
+             PKG::crypto.ivKeyHASH256(concatenated_ivkey_dk3_, ivKey);
+-            PKG::crypto.aesCbcCfb128DecryptEntry(ivKey, cipherNp, decNp);
++            const size_t np_full =
++                PKG::crypto.aesCbcCfb128DecryptEntryBounded(ivKey, cipherNp, decNp);
++            std::copy(data.begin() + np_full, data.end(), decNp.begin() + np_full);
+ 
+-            decNp.resize(rsize);
+             Common::FS::IOFile out(extract_path / "sce_sys" / name,
+                                    Common::FS::FileAccessMode::Write);
+             out.Write(decNp);

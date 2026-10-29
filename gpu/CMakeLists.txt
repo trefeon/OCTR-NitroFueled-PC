@@ -105,6 +105,99 @@ if (MINGW)
     endforeach()
 endif()
 
+# CTR PKG import (Task 1): pinned shadPS4Plus pkg_extractor plus the owned
+# 0x403-tail patch (GPL-2.0-or-later; see
+# third_party/shadps4plus-pkg/README.CTR.md). Windows-only; skipped quietly
+# when the submodule (or its nested externals/cryptopp checkout) is absent so
+# existing configures never break. The patch applies idempotently at
+# configure time (check-then-apply, same pattern build.sh uses for FSR-Vulkan).
+option(BB_BUILD_PKG_EXTRACTOR "Build the pinned pkg_extractor for PKG import" ON)
+set(BB_PKG_EXTRACTOR_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/shadps4plus-pkg"
+    CACHE PATH "Pinned shadPS4Plus checkout providing extractor/")
+set(BB_PKG_EXTRACTOR_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/../patches/pkg-extractor-0x403-tail.patch"
+    CACHE FILEPATH "Owned 0x403 tail fix applied to the pinned extractor")
+if (WIN32 AND BB_BUILD_PKG_EXTRACTOR)
+    # The pinned extractor ships its own CMakeLists with
+    # cmake_minimum_required(VERSION 3.5), which CMake >= 4 refuses, so this
+    # stanza defines the target directly from the pinned source list instead
+    # of add_subdirectory()ing it. Sources mirror
+    # third_party/shadps4plus-pkg/extractor/CMakeLists.txt at the pin.
+    set(BB_PKG_EXTRACTOR_SRCS
+        "${BB_PKG_EXTRACTOR_SOURCE}/extractor/main.cpp"
+        "${BB_PKG_EXTRACTOR_SOURCE}/src/core/loader.cpp"
+        "${BB_PKG_EXTRACTOR_SOURCE}/src/core/file_format/pkg.cpp"
+        "${BB_PKG_EXTRACTOR_SOURCE}/src/core/file_format/psf.cpp"
+        "${BB_PKG_EXTRACTOR_SOURCE}/src/core/file_format/pkg_type.cpp"
+        "${BB_PKG_EXTRACTOR_SOURCE}/src/core/crypto/crypto.cpp"
+        "${BB_PKG_EXTRACTOR_SOURCE}/src/common/io_file.cpp"
+        "${BB_PKG_EXTRACTOR_SOURCE}/src/common/assert.cpp"
+        "${BB_PKG_EXTRACTOR_SOURCE}/src/common/error.cpp"
+        "${BB_PKG_EXTRACTOR_SOURCE}/src/common/path_util.cpp"
+        "${BB_PKG_EXTRACTOR_SOURCE}/src/common/string_util.cpp")
+    set(BB_PKG_EXTRACTOR_MISSING "")
+    foreach(src IN LISTS BB_PKG_EXTRACTOR_SRCS)
+        if (NOT EXISTS "${src}")
+            string(APPEND BB_PKG_EXTRACTOR_MISSING " ${src}")
+        endif()
+    endforeach()
+    if (BB_PKG_EXTRACTOR_MISSING STREQUAL ""
+        AND EXISTS "${BB_PKG_EXTRACTOR_SOURCE}/externals/cryptopp/aes.h")
+        find_package(ZLIB 1.3 QUIET MODULE)
+        find_program(BB_MAKE_PROGRAM NAMES make mingw32-make)
+        if (NOT ZLIB_FOUND)
+            message(STATUS "pkg_extractor skipped: ZLIB not found")
+        elseif (NOT BB_MAKE_PROGRAM)
+            message(STATUS "pkg_extractor skipped: make not found (needed for bundled cryptopp)")
+        else()
+            execute_process(
+                COMMAND git apply --reverse --check "${BB_PKG_EXTRACTOR_PATCH}"
+                WORKING_DIRECTORY "${BB_PKG_EXTRACTOR_SOURCE}"
+                RESULT_VARIABLE BB_PKG_PATCH_CHECK
+                OUTPUT_QUIET ERROR_QUIET)
+            if (NOT BB_PKG_PATCH_CHECK EQUAL 0)
+                execute_process(
+                    COMMAND git apply --whitespace=fix "${BB_PKG_EXTRACTOR_PATCH}"
+                    WORKING_DIRECTORY "${BB_PKG_EXTRACTOR_SOURCE}"
+                    RESULT_VARIABLE BB_PKG_PATCH_APPLY
+                    OUTPUT_VARIABLE BB_PKG_PATCH_OUT
+                    ERROR_VARIABLE BB_PKG_PATCH_OUT)
+                if (NOT BB_PKG_PATCH_APPLY EQUAL 0)
+                    message(WARNING "pkg_extractor 0x403 patch did not apply: ${BB_PKG_PATCH_OUT}")
+                endif()
+            endif()
+            # The pinned extractor links its cryptopp static library from its
+            # own build tree (see its build/cryptobuild); bootstrap it with
+            # the equivalent steps before the target links.
+            set(BB_CRYPTOPP_LIB "${CMAKE_BINARY_DIR}/pkg_extractor_cryptopp/libcryptopp.a")
+            add_custom_command(
+                OUTPUT "${BB_CRYPTOPP_LIB}"
+                COMMAND "${BB_MAKE_PROGRAM}" -C "${BB_PKG_EXTRACTOR_SOURCE}/externals/cryptopp"
+                    -f GNUmakefile libcryptopp.a
+                COMMAND ${CMAKE_COMMAND} -E copy
+                    "${BB_PKG_EXTRACTOR_SOURCE}/externals/cryptopp/libcryptopp.a"
+                    "${BB_CRYPTOPP_LIB}"
+                VERBATIM)
+            add_custom_target(pkg_extractor_cryptopp DEPENDS "${BB_CRYPTOPP_LIB}")
+            add_library(pkg_extractor_cryptopp_lib STATIC IMPORTED GLOBAL)
+            set_property(TARGET pkg_extractor_cryptopp_lib PROPERTY
+                IMPORTED_LOCATION "${BB_CRYPTOPP_LIB}")
+            add_dependencies(pkg_extractor_cryptopp_lib pkg_extractor_cryptopp)
+            add_executable(pkg_extractor ${BB_PKG_EXTRACTOR_SRCS})
+            add_dependencies(pkg_extractor pkg_extractor_cryptopp)
+            target_include_directories(pkg_extractor PRIVATE
+                "${BB_PKG_EXTRACTOR_SOURCE}/src" "${BB_PKG_EXTRACTOR_SOURCE}/externals")
+            target_compile_definitions(pkg_extractor PRIVATE
+                NTDDI_VERSION=0x0A000006 _WIN32_WINNT=0x0A00 WINVER=0x0A00)
+            target_link_libraries(pkg_extractor PRIVATE pkg_extractor_cryptopp_lib ZLIB::ZLIB)
+            set_target_properties(pkg_extractor PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+                CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
+        endif()
+    else()
+        message(STATUS "pkg_extractor skipped: submodule third_party/shadps4plus-pkg not checked out")
+    endif()
+endif()
+
 # Host shaders -> headers (same scheme as shadPS4's host_shaders/CMakeLists.txt).
 set(SHADER_SRC ${CMAKE_CURRENT_SOURCE_DIR}/shadps4/video_core/host_shaders)
 set(SHADER_INCLUDE ${CMAKE_CURRENT_BINARY_DIR}/include)
