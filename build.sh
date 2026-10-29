@@ -39,6 +39,13 @@ MINGW*|MSYS*)
     cp out/gpu-win/sacredfire.exe out/gpu-win/bb-gpu-capabilities.exe out/gpu-win/CTR-NitroFueled-PC.exe out/
     if [[ -f out/gpu-win/pkg_extractor.exe ]]; then
         cp out/gpu-win/pkg_extractor.exe out/pkg_extractor.exe
+        for dll in zlib1.dll libc++.dll; do
+            if [[ ! -f $msys2_root/clang64/bin/$dll ]]; then
+                echo "pkg_extractor runtime dependency not found: $msys2_root/clang64/bin/$dll" >&2
+                exit 1
+            fi
+            cp "$msys2_root/clang64/bin/$dll" out/
+        done
     fi
     # BB_VERSION names a build before its release tag exists (BB_VERSION=v0.5 bash build.sh).
     version=${BB_VERSION:-$(git describe --tags --match 'v*' --always 2>/dev/null || echo unknown)}
