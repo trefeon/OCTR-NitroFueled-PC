@@ -259,6 +259,13 @@ class PatchedSourceStructureTests(unittest.TestCase):
         self.assertEqual(pkg.count("std::vector<u8> data;"), 2)
         self.assertIn("std::span<const u8> cipherNp(data.data(), data.size());", pkg)
 
+    def test_np_overwrite_write_is_byte_count_checked(self):
+        # Residual from review: the NP overwrite silently ignored
+        # short-write/flush failure while adjacent paths checked counts.
+        pkg = self.pkg()
+        self.assertIn("out.Write(decNp) != decNp.size()", pkg)
+        self.assertGreaterEqual(pkg.count("Failed to write complete PKG output file"), 3)
+
     def test_invalid_paths_exit_nonzero(self):
         main = self.main()
         self.assertGreaterEqual(main.count("return 1;"), 6)

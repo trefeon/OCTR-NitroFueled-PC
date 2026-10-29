@@ -140,7 +140,7 @@ index b5d8104..a47f129 100644
                       std::span<CryptoPP::byte, 16> NPcommID, std::span<CryptoPP::byte, 16> efsmIv,
                       std::span<CryptoPP::byte> ciphertext, std::span<CryptoPP::byte> decrypted);
 diff --git a/src/core/file_format/pkg.cpp b/src/core/file_format/pkg.cpp
-index 8ff698f..dee0451 100644
+index 8ff698f..63b87c6 100644
 --- a/src/core/file_format/pkg.cpp
 +++ b/src/core/file_format/pkg.cpp
 @@ -1,7 +1,10 @@
@@ -365,7 +365,7 @@ index 8ff698f..dee0451 100644
              out.Close();
  
              file.Seek(currentPos);
-@@ -216,35 +302,42 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
+@@ -216,38 +302,48 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
  
          std::vector<u8> data;
          data.resize(entry.size);
@@ -424,7 +424,14 @@ index 8ff698f..dee0451 100644
 -            decNp.resize(rsize);
              Common::FS::IOFile out(extract_path / "sce_sys" / name,
                                     Common::FS::FileAccessMode::Write);
-             out.Write(decNp);
+-            out.Write(decNp);
++            if (out.Write(decNp) != decNp.size() || !out.Flush()) {
++                failreason = "Failed to write complete PKG output file";
++                return false;
++            }
+             out.Close();
+         }
+ 
 diff --git a/src/core/loader.cpp b/src/core/loader.cpp
 index f80bfbb..7173a8c 100644
 --- a/src/core/loader.cpp
