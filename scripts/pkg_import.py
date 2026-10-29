@@ -175,12 +175,15 @@ def extract_stage(extractor, pkg, out_dir, log=None, cancel=None):
                             text=True)
     try:
         assert proc.stdout is not None
-        for line in proc.stdout:
-            _log(line.rstrip("\n"), log)
-            if cancel is not None and cancel.is_set():
-                proc.terminate()
-                raise Cancelled(f"extraction of {Path(pkg).name} cancelled")
-        rc = proc.wait()
+        try:
+            for line in proc.stdout:
+                _log(line.rstrip("\n"), log)
+                if cancel is not None and cancel.is_set():
+                    proc.terminate()
+                    raise Cancelled(f"extraction of {Path(pkg).name} cancelled")
+            rc = proc.wait()
+        finally:
+            proc.stdout.close()
     finally:
         if proc.poll() is None:
             proc.kill()

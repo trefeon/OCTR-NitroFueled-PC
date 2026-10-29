@@ -587,5 +587,65 @@ class PkgImportTests(unittest.TestCase):
             kernel32.CloseHandle(pi.hProcess)
 
 
+    # -- Fix round 2: extractor stdout pipe is always closed ----------------------
+    # The warning fires when the TextIOWrapper is collected with the fd still
+    # open. On failure paths the traceback keeps Popen alive, so gc.collect()
+    # must run after assertRaises exits (which drops the traceback) — hence
+    # the runner below instead of a plain context manager.
+    def _extract_and_check_warnings(self, fn):
+        import gc
+        import warnings
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            result = fn()
+            gc.collect()
+        leaked = [str(w.message) for w in caught
+                  if issubclass(w.category, ResourceWarning)
+                  and "unclosed file" in str(w.message)]
+        self.assertEqual(leaked, [], "extractor stdout pipe left open")
+        return result
+
+    def test_extract_closes_stdout_on_success(self):
+        d = self.pkg_dir(("CUSA13795-base.pkg", BASE_SFO))
+        out = self.root / "out-ok"
+        root = self._extract_and_check_warnings(
+            lambda: pkg_import.extract_stage(
+                self.extractor, d / "CUSA13795-base.pkg", out,
+                log=lambda line: None))
+        self.assertTrue((root / "eboot.bin").is_file())
+
+    def test_extract_closes_stdout_on_failure(self):
+        junk = self.root / "junk.pkg"
+        junk.write_bytes(b"not a package")
+        out = self.root / "out-fail"
+
+        def run():
+            with self.assertRaises(ValueError):
+                pkg_import.extract_stage(
+                    self.extractor, junk, out, log=lambda line: None)
+        self._extract_and_check_warnings(run)
+
+    def test_extract_closes_stdout_on_cancel(self):
+        import threading
+        # A chatty extractor: the pre-set cancel fires on the first line.
+        slow = self.root / "slow_extractor.py"
+        slow.write_text(
+            "import sys\n"
+            "print('starting', flush=True)\n"
+            "for i in range(1000000):\n"
+            "    print(f'line {i}', flush=True)\n")
+        d = self.pkg_dir(("CUSA13795-base.pkg", BASE_SFO))
+        out = self.root / "out-cancel"
+        cancel = threading.Event()
+        cancel.set()
+
+        def run():
+            with self.assertRaises(pkg_import.Cancelled):
+                pkg_import.extract_stage(
+                    [sys.executable, str(slow)], d / "CUSA13795-base.pkg",
+                    out, log=lambda line: None, cancel=cancel)
+        self._extract_and_check_warnings(run)
+
+
 if __name__ == "__main__":
     unittest.main()
