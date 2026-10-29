@@ -36,7 +36,8 @@ CHECK_TYPE_CODES = {101: "base", 102: "update", 103: "dlc"}
 
 PATCH = ROOT / "patches" / "pkg-extractor-0x403-tail.patch"
 SUBMODULE = ROOT / "third_party" / "shadps4plus-pkg"
-README = SUBMODULE / "README.CTR.md"
+README = ROOT / "third_party" / "shadps4plus-pkg.README.CTR.md"
+README_MIRROR = SUBMODULE / "README.CTR.md"
 
 
 def split_tail(size, block=AES_BLOCK):
@@ -137,12 +138,23 @@ class SubmodulePinTests(unittest.TestCase):
         self.assertIn("160000", proc.stdout)
 
     def test_readme_records_pin_and_patch(self):
-        self.assertTrue(README.is_file(), f"missing pin record: {README}")
+        # Versioned copy outside the submodule path: this is what a fresh
+        # clone carries (a file under the submodule path cannot be committed
+        # from the superproject).
+        self.assertTrue(README.is_file(), f"missing versioned pin record: {README}")
         text = README.read_text(encoding="utf-8")
         self.assertIn(BASELINE_SHA, text)
         self.assertIn("pkg-extractor-0x403-tail.patch", text)
         self.assertIn("GPL-2.0-or-later", text)
         self.assertIn("D:/github_repo/shadPS4Plus", text)
+
+    def test_submodule_mirror_matches_versioned_record(self):
+        # Convenience mirror inside the checked-out submodule tree; required
+        # to stay byte-identical to the versioned record when present.
+        if not SUBMODULE.is_dir():
+            self.skipTest("submodule not checked out")
+        self.assertTrue(README_MIRROR.is_file(), f"missing submodule mirror: {README_MIRROR}")
+        self.assertEqual(README_MIRROR.read_bytes(), README.read_bytes())
 
 
 class BuildWiringTests(unittest.TestCase):

@@ -107,7 +107,7 @@ endif()
 
 # CTR PKG import (Task 1): pinned shadPS4Plus pkg_extractor plus the owned
 # 0x403-tail patch (GPL-2.0-or-later; see
-# third_party/shadps4plus-pkg/README.CTR.md). Windows-only; skipped quietly
+# third_party/shadps4plus-pkg.README.CTR.md). Windows-only; skipped quietly
 # when the submodule (or its nested externals/cryptopp checkout) is absent so
 # existing configures never break. The patch applies idempotently at
 # configure time (check-then-apply, same pattern build.sh uses for FSR-Vulkan).
