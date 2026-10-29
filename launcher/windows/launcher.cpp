@@ -702,6 +702,7 @@ struct App {
     std::string job_error;
     // PKG import: scripts/pkg_import.py runs as a child with piped output.
     HANDLE pkg_import_process = nullptr;
+    HANDLE pkg_import_job = nullptr;  // kills the whole importer tree on cancel
     std::vector<std::string> pkg_import_log;  // guarded by mutex
     std::string pkg_import_staging, pkg_import_merged;  // guarded by mutex
     std::atomic<size_t> merge_done{0}, merge_total{0};
@@ -1557,8 +1558,8 @@ bool UpdateBusy();     // whether the updater is working (defined with the updat
 
 /// A PKG folder (one CUSA13795 base, one 1.21 update, optional matching DLC) -> a new validated
 /// install, via scripts/pkg_import.py as a child process with streamed output. Cancellation
-/// terminates the child; the script (or the launcher, via STAGING=) removes only this import's
-/// staging directory. Failure never touches the current game folder; success switches to the new
+/// kills the importer's job object (importer plus any extractor grandchildren); the script
+/// (or the launcher, via STAGING=) removes only this import's staging directory. Failure never touches the current game folder; success switches to the new
 /// merged directory only after game_check.py accepts it.
 void StartPkgImport(const fs::path& pkg_dir, const fs::path& dest_dir) {
     App& a = g_app;
@@ -1607,6 +1608,12 @@ void StartPkgImport(const fs::path& pkg_dir, const fs::path& dest_dir) {
         a.job_finished = true;
         return;
     }
+    a.pkg_import_job = CreateJobObjectW(nullptr, nullptr);
+    if (a.pkg_import_job && !AssignProcessToJobObject(a.pkg_import_job, pi.hProcess)) {
+        CloseHandle(a.pkg_import_job);
+        a.pkg_import_job = nullptr;
+    }
+    ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
     a.pkg_import_process = pi.hProcess;
     a.worker = std::thread([read] {
@@ -1660,7 +1667,11 @@ void StartPkgImport(const fs::path& pkg_dir, const fs::path& dest_dir) {
 void StopPkgImport() {
     App& a = g_app;
     if (a.job != Job::PkgImport) return;
-    if (a.pkg_import_process) TerminateProcess(a.pkg_import_process, 1);
+    // The job kills the importer and any extractor grandchildren still
+    // running; without it a cancelled extractor would keep writing to the
+    // staging directory the launcher is about to remove.
+    if (a.pkg_import_job) TerminateJobObject(a.pkg_import_job, 1);
+    else if (a.pkg_import_process) TerminateProcess(a.pkg_import_process, 1);
 }
 
 /// The European edition is chosen (its languages differ from the Americas build's).
@@ -2117,6 +2128,10 @@ void PollJobs() {
             error = a.job_error;
             merged = a.pkg_import_merged;
             staging = a.pkg_import_staging;
+        }
+        if (a.pkg_import_job) {
+            CloseHandle(a.pkg_import_job);
+            a.pkg_import_job = nullptr;
         }
         if (a.pkg_import_process) {
             CloseHandle(a.pkg_import_process);
@@ -7497,8 +7512,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         g_update.worker.join();
     }
     // Background work finishes on its own; a running game keeps running.
-    if (g_app.job == Job::PkgImport && g_app.pkg_import_process)
-        TerminateProcess(g_app.pkg_import_process, 1);
+    if (g_app.job == Job::PkgImport) {
+        if (g_app.pkg_import_job) TerminateJobObject(g_app.pkg_import_job, 1);
+        else if (g_app.pkg_import_process) TerminateProcess(g_app.pkg_import_process, 1);
+    }
     if (g_app.worker.joinable()) {
         if (g_app.job == Job::Play) g_app.worker.detach();
         else g_app.worker.join();

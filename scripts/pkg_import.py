@@ -205,6 +205,8 @@ def parse_sfo(data):
         key_at, val_at = keys + key_off, values + data_off
         if key_at >= len(data) or val_at + size > len(data):
             raise ValueError("damaged SFO entry")
+        if fmt == 0x404 and size < 4:
+            raise ValueError("damaged SFO integer field")
         end = data.index(0, key_at) if 0 in data[key_at:] else len(data)
         key = data[key_at:end].decode("ascii", "replace")
         raw = data[val_at:val_at + size]
@@ -303,6 +305,8 @@ def read_pkg_sfo(pkg):
         with open(pkg, "rb") as f:
             f.seek(table)
             entries = f.read(count * 32)
+            if len(entries) < count * 32:
+                return None, "damaged package: truncated entry table"
             for i in range(count):
                 entry = entries[i * 32:(i + 1) * 32]
                 (eid,) = struct.unpack_from(">I", entry, 0)
@@ -317,7 +321,7 @@ def read_pkg_sfo(pkg):
                     return None, "param.sfo too large"
                 f.seek(offset)
                 return parse_sfo(f.read(size)), ""
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, struct.error) as e:
         return None, f"damaged package: {e}"
     return None, "no param.sfo"
 
@@ -334,6 +338,39 @@ def is_matching_dlc(pkg):
     return True, ""
 
 
+_COPY_CHUNK = 1 << 20
+
+
+def _copy_file_exclusive(src, dst):
+    """Copy src to a newly created dst; never follows or replaces anything.
+
+    Raises FileExistsError when dst already exists (nothing touched), OSError
+    otherwise. A partially written dst is removed; only this call's own file
+    is ever deleted, since O_EXCL guarantees it created the entry.
+    """
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+             | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    dst_fd = os.open(dst, flags, 0o666)
+    try:
+        with open(src, "rb") as f:
+            while True:
+                chunk = f.read(_COPY_CHUNK)
+                if not chunk:
+                    break
+                view = memoryview(chunk)
+                while view:
+                    view = view[os.write(dst_fd, view):]
+        shutil.copystat(src, dst)
+    except BaseException:
+        os.close(dst_fd)
+        try:
+            os.unlink(dst)
+        except OSError:
+            pass
+        raise
+    os.close(dst_fd)
+
+
 def copy_dlc_raw(dlc_pkgs, dlc_dir, log=None):
     """Copy matching DLC PKGs unchanged; never overwrite, never extract.
 
@@ -346,23 +383,30 @@ def copy_dlc_raw(dlc_pkgs, dlc_dir, log=None):
     report = {"copied": [], "duplicates": [], "failed": [], "skipped": []}
     for pkg in dlc_pkgs:
         pkg = Path(pkg)
-        ok, reason = is_matching_dlc(pkg)
-        if not ok:
-            _log(f"DLC {pkg.name} skipped: {reason}", log)
-            report["skipped"].append(pkg.name)
-            continue
-        target = dlc_dir / pkg.name
-        if target.exists():
-            _log(f"DLC {pkg.name} already present, kept the existing file", log)
-            report["duplicates"].append(pkg.name)
-            continue
         try:
-            shutil.copy2(pkg, target)
-        except OSError as e:
+            ok, reason = is_matching_dlc(pkg)
+            if not ok:
+                _log(f"DLC {pkg.name} skipped: {reason}", log)
+                report["skipped"].append(pkg.name)
+                continue
+            target = dlc_dir / pkg.name
+            if os.path.lexists(target):
+                _log(f"DLC {pkg.name} already present, kept the existing file", log)
+                report["duplicates"].append(pkg.name)
+                continue
+            try:
+                _copy_file_exclusive(pkg, target)
+            except FileExistsError:
+                _log(f"DLC {pkg.name} already present, kept the existing file", log)
+                report["duplicates"].append(pkg.name)
+                continue
+            report["copied"].append(pkg.name)
+        except Cancelled:
+            raise
+        except Exception as e:  # defensive: DLC faults never abort the install
             _log(f"DLC {pkg.name} copy failed: {e}", log)
             report["failed"].append(pkg.name)
             continue
-        report["copied"].append(pkg.name)
     return report
 
 

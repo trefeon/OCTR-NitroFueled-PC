@@ -34,10 +34,6 @@ struct PkgImportPaths {
     static std::filesystem::path Script(const std::filesystem::path& launcher_root) {
         return (launcher_root / L"scripts" / L"pkg_import.py").lexically_normal();
     }
-
-    static std::wstring InstallDirName(const std::wstring& title) { return title + L"-1.21"; }
-
-    static std::wstring StagingPrefix() { return L"stage-"; }
 };
 
 }  // namespace LauncherPaths

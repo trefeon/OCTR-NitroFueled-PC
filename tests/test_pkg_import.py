@@ -397,6 +397,195 @@ class PkgImportTests(unittest.TestCase):
             capture_output=True, text=True, stdin=subprocess.DEVNULL, env=self.env)
         self.assertNotEqual(proc.returncode, 0)
 
+    # -- Fix round: DLC faults never abort the install -------------------------
+    def test_truncated_dlc_entry_table_is_skipped(self):
+        sfo, reason = pkg_import.read_pkg_sfo(self._truncated_pkg())
+        self.assertIsNone(sfo)
+        self.assertTrue(reason, "a reason is reported")
+
+    def test_short_sfo_int_field_rejected(self):
+        with self.assertRaises(ValueError):
+            pkg_import.parse_sfo(self._short_int_sfo())
+
+    def test_truncated_dlc_pkg_skipped_install_succeeds(self):
+        d = self.std_pkgs()
+        build_pkg(d / "CUSA13795-dlc3.pkg", DLC_SFO)
+        with open(d / "CUSA13795-dlc3.pkg", "r+b") as f:
+            f.truncate(0x30)  # header plus a partial entry: truncated table
+        dest = self.root / "lib"
+        dest.mkdir()
+        log = []
+        merged = pkg_import.install(d, log=log.append, **self.install_kwargs(dest))
+        self.assertTrue(merged.is_dir())
+        self.assertFalse((dest / "dlc" / "CUSA13795-dlc3.pkg").exists())
+        self.assertTrue(any("CUSA13795-dlc3.pkg skipped" in line for line in log),
+                        log)
+        self.assertTrue(any(line.startswith("MERGED_DIR=") for line in log), log)
+
+    def _truncated_pkg(self):
+        path = self.root / "cut.pkg"
+        build_pkg(path, DLC_SFO)
+        with open(path, "r+b") as f:
+            f.truncate(0x30)
+        return path
+
+    @staticmethod
+    def _short_int_sfo():
+        keys, values = b"A\x00", b"AB"
+        header = struct.pack("<4sIIII", b"\0PSF", 0x101, 36, 38, 1)
+        return header + struct.pack("<HHIII", 0, 0x404, 2, 2, 0) + keys + values
+
+    # -- Fix round: exclusive DLC copy -----------------------------------------
+    def test_dangling_symlink_dlc_reported_duplicate_and_untouched(self):
+        try:
+            link = self.root / "dlc-link"
+            link.mkdir()
+            target = link / "CUSA13795-dlc1.pkg"
+            os.symlink(self.root / "does-not-exist.pkg", target)
+        except (OSError, NotImplementedError) as e:
+            self.skipTest(f"symlinks unavailable: {e}")
+        d = self.std_pkgs()
+        report = pkg_import.copy_dlc_raw([d / "CUSA13795-dlc1.pkg"], link)
+        self.assertEqual(report["duplicates"], ["CUSA13795-dlc1.pkg"])
+        self.assertTrue(target.is_symlink(), "the player's link is not replaced")
+        self.assertTrue(os.readlink(target).endswith("does-not-exist.pkg"),
+                        os.readlink(target))
+
+    def test_partial_copy_cleaned_on_metadata_failure(self):
+        import unittest.mock as mock
+        d = self.std_pkgs()
+        dest = self.root / "lib"
+        dest.mkdir()
+        dlc_dir = dest / "dlc"
+        dlc_dir.mkdir()
+        with mock.patch.object(pkg_import.shutil, "copystat",
+                               side_effect=OSError("no metadata")):
+            report = pkg_import.copy_dlc_raw([d / "CUSA13795-dlc1.pkg"], dlc_dir)
+        self.assertEqual(report["failed"], ["CUSA13795-dlc1.pkg"])
+        self.assertFalse((dlc_dir / "CUSA13795-dlc1.pkg").exists()
+                         or os.path.lexists(dlc_dir / "CUSA13795-dlc1.pkg"))
+
+    # -- Fix round: job-object process-tree kill (Windows-only mechanism check) --
+    # Mirrors the launcher's StartPkgImport/StopPkgImport spawn pattern
+    # (CREATE_SUSPENDED -> AssignProcessToJobObject -> ResumeThread ->
+    # TerminateJobObject) so the extractor grandchild cannot outlive a cancel.
+    @unittest.skipUnless(sys.platform == "win32", "Windows job objects only")
+    def test_job_object_kills_process_tree(self):
+        import ctypes
+        import time
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        class STARTUPINFO(ctypes.Structure):
+            _fields_ = [("cb", ctypes.c_ulong),
+                        ("lpReserved", ctypes.c_void_p),
+                        ("lpDesktop", ctypes.c_void_p),
+                        ("lpTitle", ctypes.c_void_p),
+                        ("dwX", ctypes.c_ulong), ("dwY", ctypes.c_ulong),
+                        ("dwXSize", ctypes.c_ulong), ("dwYSize", ctypes.c_ulong),
+                        ("dwXCountChars", ctypes.c_ulong),
+                        ("dwYCountChars", ctypes.c_ulong),
+                        ("dwFillAttribute", ctypes.c_ulong),
+                        ("dwFlags", ctypes.c_ulong),
+                        ("wShowWindow", ctypes.c_ushort),
+                        ("cbReserved2", ctypes.c_ushort),
+                        ("lpReserved2", ctypes.c_void_p),
+                        ("hStdInput", ctypes.c_void_p),
+                        ("hStdOutput", ctypes.c_void_p),
+                        ("hStdError", ctypes.c_void_p)]
+
+        class PROCESS_INFORMATION(ctypes.Structure):
+            _fields_ = [("hProcess", ctypes.c_void_p),
+                        ("hThread", ctypes.c_void_p),
+                        ("dwProcessId", ctypes.c_ulong),
+                        ("dwThreadId", ctypes.c_ulong)]
+
+        class PROCESSENTRY32(ctypes.Structure):
+            _fields_ = [("dwSize", ctypes.c_ulong),
+                        ("cntUsage", ctypes.c_ulong),
+                        ("th32ProcessID", ctypes.c_ulong),
+                        ("th32DefaultHeapID", ctypes.c_void_p),
+                        ("th32ModuleID", ctypes.c_ulong),
+                        ("cntThreads", ctypes.c_ulong),
+                        ("th32ParentProcessID", ctypes.c_ulong),
+                        ("pcPriClassBase", ctypes.c_long),
+                        ("dwFlags", ctypes.c_ulong),
+                        ("szExeFile", ctypes.c_wchar * 260)]
+
+        def children_of(pid):
+            snap = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+            if snap == ctypes.c_void_p(-1).value:
+                return []
+            try:
+                entry = PROCESSENTRY32()
+                entry.dwSize = ctypes.sizeof(entry)
+                found = []
+                ok = kernel32.Process32FirstW(snap, ctypes.byref(entry))
+                while ok:
+                    if entry.th32ParentProcessID == pid:
+                        found.append(entry.th32ProcessID)
+                    ok = kernel32.Process32NextW(snap, ctypes.byref(entry))
+                return found
+            finally:
+                kernel32.CloseHandle(snap)
+
+        def assert_dead(pid):
+            deadline = time.time() + 10
+            STILL_ACTIVE = 0x103
+            while time.time() < deadline:
+                handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED
+                if not handle:
+                    return
+                try:
+                    code = ctypes.c_ulong()
+                    if (kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+                            and code.value != STILL_ACTIVE):
+                        return
+                finally:
+                    kernel32.CloseHandle(handle)
+                time.sleep(0.1)
+            raise AssertionError(f"process {pid} survived the job kill")
+
+        parent_script = (
+            "import subprocess, sys, time; "
+            "subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(60)']); time.sleep(60)")
+        si, pi = STARTUPINFO(), PROCESS_INFORMATION()
+        si.cb = ctypes.sizeof(si)
+        cmd = ctypes.create_unicode_buffer(
+            sys.executable + ' -c "' + parent_script + '"')
+        CREATE_SUSPENDED, CREATE_NO_WINDOW = 0x00000004, 0x08000000
+        self.assertTrue(
+            kernel32.CreateProcessW(None, cmd, None, None, False,
+                                    CREATE_SUSPENDED | CREATE_NO_WINDOW,
+                                    None, None, ctypes.byref(si),
+                                    ctypes.byref(pi)),
+            "CreateProcess suspended parent")
+        try:
+            job = kernel32.CreateJobObjectW(None, None)
+            self.assertTrue(job, "CreateJobObject")
+            try:
+                self.assertTrue(
+                    kernel32.AssignProcessToJobObject(job, pi.hProcess),
+                    "parent joins the job before it runs")
+                kernel32.ResumeThread(pi.hThread)
+                grandchild = None
+                for _ in range(100):
+                    kids = children_of(pi.dwProcessId)
+                    if kids:
+                        grandchild = kids[0]
+                        break
+                    time.sleep(0.1)
+                self.assertIsNotNone(grandchild, "grandchild started")
+                self.assertTrue(kernel32.TerminateJobObject(job, 1),
+                                "job kill terminates the tree")
+                assert_dead(pi.dwProcessId)
+                assert_dead(grandchild)
+            finally:
+                kernel32.CloseHandle(job)
+        finally:
+            kernel32.CloseHandle(pi.hThread)
+            kernel32.CloseHandle(pi.hProcess)
+
 
 if __name__ == "__main__":
     unittest.main()
