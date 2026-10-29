@@ -21,6 +21,16 @@ On top of that, this fork adds **online play** (see [Online](#online) below): pu
 private rooms, groups, friends and the Pit Stop through the RyuNET server, with your own
 nickname, Discord account linking and Discord invites.
 
+> **Privacy:** This fork has no automatic performance telemetry collection or upload. The optional
+> saved-log/statistics feature remains local-only; on the next game start, the runners clear old
+> `perf/` reports and temporary telemetry state files. Game HTTP/DNS requests are limited to
+> explicit RyuNET host overrides and localhost; the known telemetry hosts
+> `pipes-prod-glutton.public.aws.demonware.net` and `objectstore.prod.demonware.net` are blocked,
+> and unlisted game HTTP resources (such as remote avatars) may be unavailable. This is not an
+> offline mode: online gameplay and account services still contact RyuNET and game peers; Discord
+> linking and invites contact Discord when used, and enabled presence still connects to Discord;
+> update checks still contact GitHub. Voluntary player reports remain available.
+
 > **No game files are included.** You need your own dump of the game and its 1.21 update.
 > Both builds of the 1.21 update work: the one for firmware 5.05 (the reference) and the one for
 > 6.72+ (since v0.2.1).
@@ -34,14 +44,15 @@ the in-game menu, and the game's DLC from your own packages (optional). Internal
 480p to native 4K, with AMD FSR 1 or temporal upscaling (AMD FSR 3.1, or NVIDIA DLSS on RTX
 cards; experimental). Tested on
 Windows 11 24H2 with an NVIDIA RTX 3070 and an Intel i5-9500: 110-130 FPS uncapped in races with
-the 60 FPS patch (the FPS limit keeps it at 60 by default; up to 240). From v0.5.3 the first
+the 60 FPS patch (the FPS limit keeps it at 60 by default; up to 240). A 165 FPS cap is available
+for 165 Hz panels. From v0.5.3 the first
 start prepares the game's shaders for your GPU from your own dump (a few seconds, once:
 [shaders/README.md](shaders/README.md)), so new tracks and racers no longer stop the game to
 compile them; the few the recipe lacks are compiled when first seen and cached.
 
 | Release | What it brought |
 |---|---|
-| [v0.7](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.7) | Native Vulkan engine as an experimental choice in the launcher (straightarrows), with a shader build window; Speed Mode for private rooms, synced to the players who join (n0buholic); loading screens about half as long (liblzma decoding, n0buholic, and a RAM cache); motion blur off by default; older GPUs start again; opt-in anonymous performance reports; foldable friends list; in-game Graphics menu, Quit Game, Skip intro and the MSAA sky lines fixed on NVIDIA (immaculatevibes2025) |
+| [v0.7](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.7) | Native Vulkan engine as an experimental choice in the launcher (straightarrows), with a shader build window; Speed Mode for private rooms, synced to the players who join (n0buholic); loading screens about half as long (liblzma decoding, n0buholic, and a RAM cache); motion blur off by default; older GPUs start again; opt-in anonymous performance reports (historical; removed in this fork); foldable friends list; in-game Graphics menu, Quit Game, Skip intro and the MSAA sky lines fixed on NVIDIA (immaculatevibes2025) |
 | [v0.6.5](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.6.5) | Online item-box odds set by the server; 21:9/32:9 layouts render at the chosen internal resolution up to 4K (startupandhold); mods start at any internal resolution (Vo1dTear), EU mod packages (Majed-allababedi) and several name mods together (SoyAlejandroCalixto); no code 20 at a first start without GitHub; nicknames register behind ISP filters; GPUs without sparse buffers get a clear message |
 | [v0.6.4](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.6.4) | Mods checked at the code they change, so they work on more 1.21 dumps (tcosi); mods import from deep folders; no freeze when a controller connects or drops (SoyAlejandroCalixto); the Controllers tab shows each player's controller; Linux launcher with Achievements and Mods (Brony666); a racer's outfit no longer ends the game with code 3 |
 | [v0.6.3](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.6.3) | Mod fixes: game mods start again without a 21:9/32:9 layout, "Apply and restart" works with mods, and loose mods work with the game on another drive |
@@ -82,8 +93,8 @@ key, or unzip it into a new folder and copy `user\`, `bbport.ini`, `launcher.ini
 ### Online
 
 Online is on by default and connects to the community server **octr.ryu7w7.xyz**
-([RyuNET](https://github.com/Ryu7w7/ryunet-demonware-ctr), a Demonware server written for this
-game). From the game's own menus you can:
+(RyuNET, a Demonware server written for this game; its source repository is currently unavailable).
+From the game's own menus you can:
 
 - race in **public matches** with other players, alone or with your **group**;
 - create **private rooms** and invite your friends;
@@ -137,7 +148,8 @@ not in it.
 The launcher also has the game patches, FPS limit, display, monitor and controller settings, save
 backups and imports (including decrypted PS4 saves), and optional DLC: add your own DLC packages
 (`.pkg`) and the port reports them installed (CTR Nitro-Fueled's DLC only carry the license; the
-content is in the game). Spanish and English.
+content is in the game). Both Windows and Linux launchers let you choose the DLC folder; their
+existing defaults remain unchanged. Spanish and English.
 
 ### Which game dumps work
 
@@ -151,7 +163,8 @@ choose a folder, the launcher says in green or red what it found.
 | Dumped from your own PS4 with a game dumper | `eboot.bin`, `sce_module\`, `sce_sys\param.sfo`… directly in each folder (base, update) | Yes |
 | Extracted with **PS4 PKG Tool** | `Image0\` (eboot.bin, sce_module, the game data) and `Sc0\` (param.sfo and the rest of sce_sys) | Yes, from v0.3: choose the folder that holds `Image0` and `Sc0` and press *Prepare the game*. With v0.2.1, first copy **everything** in `Image0` to that folder and everything in `Sc0` to a new `sce_sys` folder in it |
 | Any other tool | Works if the files end up in one of the two layouts above | Yes |
-| A `.pkg` file that was not extracted | | No: extract it first. Only the DLC tab takes `.pkg` files |
+| CUSA13795 base + 1.21 update PKGs (Windows launcher) | One base `.pkg`, one update `.pkg` and optional matching DLC `.pkg` files in one folder | Yes: press **Import PKG folder…** on the Play page, choose the folder and a game-library destination (see below) |
+| A single `.pkg` file that was not extracted | | No: extract it first, or import the full base + update set with Import PKG folder. Only the DLC tab takes lone `.pkg` files |
 | The European edition (CUSA14876) | | Yes, from v0.5.3, also online with the USA edition |
 | Another region or edition (JP…) | | No: each one has a different executable |
 | Encrypted files (straight from a disc or an official package) | `eboot.bin could not be read as a decrypted PS4 executable` | No: dump the game again |
@@ -159,6 +172,19 @@ choose a folder, the launcher says in green or red what it found.
 Both builds of the 1.21 update work (for firmware 5.05 and for 6.72+). If something fails, the
 launcher's log and `user\last_run.log` say which file is missing; attach `last_run.log` when you
 [open an issue](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/issues).
+
+**Import PKG folder (Windows launcher):** choose the folder with your own CUSA13795 base and
+1.21 update PKGs plus any matching DLC PKGs, then choose a game-library destination. The
+launcher classifies each package with the bundled `out\pkg_extractor.exe`, extracts base and
+update into a unique `stage-*` directory on that destination volume, checks both `param.sfo`
+trees (CUSA13795, update `01.21`), merges them, gates on the normal game check, and only then
+promotes the result to a new unused `CUSA13795-1.21` install and selects it. Existing installs
+are never overwritten; failure or cancel removes only that import's staging and keeps the
+current game folder. Matching DLC is copied raw into the configured DLC folder (never
+extracted, never overwritten): CTR Nitro-Fueled's DLC only carry the license, and the port
+reports them installed from the package header and `param.sfo`. The portable ZIP bundles the
+extractor, its `zlib1.dll`/`libc++.dll` and the shadPS4Plus GPL notices; it carries no PKGs,
+game files or saves.
 
 **Or build it yourself:**
 
@@ -335,9 +361,10 @@ package declaration, not a server approval or whitelist service.
 Enabled mods override matching relative paths through the engine's read-only file
 map and sparse archive overlays. The selected source game directory stays unchanged:
 no original game files are copied, linked, repacked or overwritten. Disabling mods
-restores source reads. Only mod payloads, generated metadata and separate user saves/
-shader caches are stored. This path requires the matching updated engine, not only
-new launcher scripts. Multiple versions of a stable mod ID appear once, using the
+restores source reads. Only mod payloads, generated metadata and session-scoped user files are
+stored. On normal exit, saves and trophies are committed to that mod profile, never the vanilla
+user folder; an interrupted session keeps its copy for recovery. This path requires the matching
+updated engine, not only new launcher scripts. Multiple versions of a stable mod ID appear once, using the
 newest validated version; older inputs remain
 available for rollback. Different content claiming the same selected version is
 reported as a conflict.

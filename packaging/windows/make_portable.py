@@ -13,7 +13,9 @@ Needs MSYS2 (CLANG64) for the DLLs and for pacman, which tells THIRD-PARTY.txt w
 version and license each bundled DLL comes from. Output: dist/CTR-NitroFueled-PC-portable-windows.zip
 (+ the unpacked folder next to it, and its SHA256). Nothing from the user's own machine goes in:
 no user/ folder, no saves, no logs, no personal bbport.ini (the defaults are
-packaging/windows/portable/bbport.ini).
+packaging/windows/portable/bbport.ini), and no PKGs or game files: source packages stay
+read-only inputs for the launcher Import PKG folder flow (out/pkg_extractor.exe plus its
+zlib1.dll, libc++.dll and the shadPS4Plus GPL notices in licenses/).
 """
 import argparse
 import hashlib
@@ -60,6 +62,11 @@ SYSTEM_DLLS = {'kernel32', 'user32', 'gdi32', 'advapi32', 'shell32', 'ole32', 'o
                'psapi', 'netapi32', 'wsock32', 'd3dcompiler_47', 'gdiplus', 'd2d1', 'dwrite',
                'dinput8', 'xinput1_4', 'ucrtbase', 'vcruntime140', 'msvcp140', 'winspool',
                'cryptbase', 'sspicli', 'wintrust', 'rtworkq', 'ksuser', 'wevtapi', 'ntmarta'}
+# CTR PKG import (scripts/pkg_import.py, launcher Import PKG folder): the pinned shadPS4Plus
+# extractor plus the two DLLs it needs at run time. It lives at out/pkg_extractor.exe in the
+# package, where launcher_paths.h PkgImportPaths::Extractor expects it.
+PKG_EXTRACTOR = 'pkg_extractor.exe'
+PKG_EXTRACTOR_DLLS = ('zlib1.dll', 'libc++.dll')
 
 
 def imports(path):
@@ -148,6 +155,15 @@ def third_party(dlls, python=None, dlss=False):
                   f'  source:  https://pypi.org/project/iced-x86/{ICED_X86_VERSION}/#files', '']
     if dlss:
         lines += DLSS_THIRD_PARTY
+    lines += ['pkg_extractor.exe, in out\\ (the PKG extractor behind the launcher Import PKG',
+              '  folder flow and scripts\\pkg_import.py)',
+              '  license: GPL-2.0-or-later (licenses\\shadps4plus-pkg-LICENSE.txt)',
+              '  source:  https://github.com/trefeon/shadPS4Plus (branch ShadPs4Plus)',
+              '           plus patches\\pkg-extractor-0x403-tail.patch in this repository',
+              '  pin:     third_party\\shadps4plus-pkg.README.CTR.md in this repository',
+              '           (licenses\\shadps4plus-pkg.README.CTR.md in this package)',
+              '  runtime: out\\zlib1.dll, out\\libc++.dll (copies of the MSYS2 packages listed',
+              '           above; kept next to the extractor so it loads outside bin\\)).', '']
     lines += ['sacredfire.exe includes AMD FidelityFX FSR 3.1 (MIT, through',
               'https://github.com/FireBurn/FSR-Vulkan).', '']
     lines += [f'The launcher ({PACKAGED_LAUNCHER}) and sacredfire.exe include Dear ImGui (MIT,',
@@ -227,7 +243,8 @@ def main():
                 sys.exit(f'{f} not found (dlss_bridge\\build.bat builds the bridge)')
     exe, caps = ROOT / 'out' / 'sacredfire.exe', ROOT / 'out' / 'bb-gpu-capabilities.exe'
     launcher = ROOT / 'out' / LAUNCHER
-    for f in (exe, caps, launcher):
+    extractor = ROOT / 'out' / PKG_EXTRACTOR
+    for f in (exe, caps, launcher, extractor):
         if not f.is_file():
             sys.exit(f'{f} not found: build with build.sh first')
     folder = a.dist / NAME
@@ -240,9 +257,30 @@ def main():
     shutil.copy2(caps, folder / 'bin')
     version = a.version and f'{a.version}-windows' or (ROOT / 'out' / 'VERSION').read_text().strip()
     (folder / 'bin' / 'VERSION').write_text(version + '\n')
-    dlls = closure([exe, caps])
+    dlls = closure([exe, caps, extractor])
     for path in dlls.values():
         shutil.copy2(path, folder / 'bin')
+    # The PKG extractor behind the launcher Import PKG folder flow
+    # (launcher_paths.h PkgImportPaths::Extractor): out\pkg_extractor.exe plus the two DLLs it
+    # needs, kept next to it so it loads when the importer spawns it. No PKGs, game files or
+    # user data are bundled: source packages stay read-only inputs on the player's PC.
+    shutil.copy2(extractor, folder / 'out' / PKG_EXTRACTOR)
+    for dll in PKG_EXTRACTOR_DLLS:
+        if dll in dlls:
+            shutil.copy2(dlls[dll], folder / 'out' / dll)
+        else:
+            src = CLANG_BIN / dll
+            if not src.is_file():
+                sys.exit(f'{dll} needed by {PKG_EXTRACTOR} but not in {CLANG_BIN}')
+            shutil.copy2(src, folder / 'out' / dll)
+    pin_record = ROOT / 'third_party' / 'shadps4plus-pkg.README.CTR.md'
+    upstream_license = ROOT / 'third_party' / 'shadps4plus-pkg' / 'LICENSE'
+    for f in (pin_record, upstream_license):
+        if not f.is_file():
+            sys.exit(f'{f} not found: needed for the pkg_extractor license notices')
+    (folder / 'licenses').mkdir(exist_ok=True)
+    shutil.copy2(upstream_license, folder / 'licenses' / 'shadps4plus-pkg-LICENSE.txt')
+    shutil.copy2(pin_record, folder / 'licenses' / 'shadps4plus-pkg.README.CTR.md')
     # The Vulkan loader (vulkan-1.dll, loaded at run time, so not in the closure): Windows keeps
     # the one an old GPU driver installed, which can report only Vulkan 1.2 even where the GPU's
     # current driver has 1.3 ("only 1.2 is supported by instance"). Next to the exe, ours is used.
@@ -252,7 +290,7 @@ def main():
     if dlss_files:
         for path in dlss_files:
             shutil.copy2(path, folder / 'bin')
-        (folder / 'licenses').mkdir()
+        (folder / 'licenses').mkdir(exist_ok=True)
         shutil.copy2(a.dlss_sdk / 'LICENSE.txt', folder / 'licenses' / 'NVIDIA-DLSS-SDK-LICENSE.txt')
         write_text(folder / 'licenses' / 'dlss-bridge-LICENSE.txt',
                    (ROOT / 'dlss_bridge' / 'LICENSE.txt').read_text(encoding='utf-8'))
@@ -307,13 +345,10 @@ def main():
     shutil.copy2(aerolib, folder / 'out')
     # bbport.ini is in .gitignore (it is the player's settings file), so the defaults live in
     # bbport.default.ini and ship under the real name.
-    # The launcher sets up the game folder and starts it; the .bat is the way without it.
     # bbport.default.ini, not bbport.ini: unzipping a new version over an old one keeps the
     # player's settings (run.py and the launcher copy the defaults when bbport.ini is missing).
-    for source, target in (('bbport.default.ini', 'bbport.default.ini'),
-                           ('Jugar CTR Nitro-Fueled.bat', 'Jugar sin launcher.bat'),
-                           ('LEEME.txt', 'LEEME.txt')):
-        write_text(folder / target, (PORTABLE / source).read_text(encoding='utf-8'))
+    write_text(folder / 'bbport.default.ini',
+               (PORTABLE / 'bbport.default.ini').read_text(encoding='utf-8'))
     write_text(folder / 'LICENSE', (ROOT / 'LICENSE').read_text(encoding='utf-8'))
     (folder / 'THIRD-PARTY.txt').write_bytes(third_party(dlls, python, bool(dlss_files)).encode('utf-8'))
 

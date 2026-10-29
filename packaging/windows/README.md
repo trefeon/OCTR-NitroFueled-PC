@@ -24,8 +24,17 @@ Then, in the repository (CLANG64 shell):
 
 ```bash
 git submodule update --init --recursive
-bash build.sh                      # out/sacredfire.exe, out/bb-gpu-capabilities.exe
+bash build.sh                      # portable defaults; out/sacredfire.exe, out/bb-gpu-capabilities.exe
 ```
+
+For a local build optimized for an Intel Core i7-11800H, opt into Tiger Lake CPU tuning:
+
+```bash
+BB_TARGET_CPU=tigerlake BB_LTO=ON bash build.sh
+```
+
+This target-specific build is for this CPU, not for portable release assets; leave `BB_TARGET_CPU`
+unset for release builds that must run across many CPUs.
 
 ## Game files
 
@@ -44,10 +53,20 @@ Win32 + Direct3D 11, linked statically, no DLLs) is what players open:
 
 - **Play**: base game and 1.21 update folders (told apart by `param.sfo`), merged with hard links
   into `CUSA13795-1.21`, checked with `scripts/game_check.py`; starts `run.py` with the bundled
-  Python in a job object and shows its output.
+  Python in a job object and shows its output. **Import PKG folder…** takes a folder with one
+  CUSA13795 base PKG, one 1.21 update PKG and optional matching DLC PKGs instead: pick the
+  source folder and a game-library destination, and the launcher classifies each package with
+  the bundled `out\pkg_extractor.exe` (`--check-type`), extracts base and update into a unique
+  `stage-*` directory on the destination volume (streamed log, cancellable), validates both
+  `param.sfo` trees (CUSA13795; update `01.21`), merges them into the staging tree, gates on
+  `scripts/game_check.py`, then atomically renames the validated tree to a new unused
+  `CUSA13795-1.21` install and selects it. Existing installs are never overwritten (a name
+  collision needs a different destination); failure or cancel removes only that import's
+  staging and leaves the current game folder unchanged. Source PKGs are read-only inputs.
 - **Settings**: FPS limit, background shader compiles, fullscreen, FPS counter (`bbport.ini`, the
-  in-game menu's keys); monitor, present mode, controller, game language, PS4 Pro mode
-  (`launcher.ini`, passed as `BB_*` variables).
+  in-game menu's keys); monitor, present mode, controller, game language, PS4 Pro mode, and the DLC
+  folder (`launcher.ini`, passed as `BB_*` variables). The Gamepad tab can bind up to four buttons
+  to one action; Change adds a distinct button, while Clear removes the full custom binding.
 - **Online**: Speed Mode (Experimental), stored in `bbport.ini`. Every player in the private
   room needs the same build with Speed enabled. Adventure and Arcade keep their normal item
   and Wumpa boxes. The in-game menu has the same switch under Room; it applies to the next
@@ -56,11 +75,15 @@ Win32 + Direct3D 11, linked statically, no DLLs) is what players open:
   keep their `bbport.ini` keys, others go through `patches.json`.
 - **Saves**: backups to `backups\`, restore, export, import of another PC's saves or a decrypted
   PS4 save (`sce_sys\param.sfo`, converted to the runtime's `<dir>` + `<dir>.sce_sys\param.bin`).
-- **DLC** (optional): the player's own add-on packages (`.pkg`) copied into `dlc\`.
-  `scripts/content_profile.py` reads their entitlement labels (package header and `param.sfo`,
-  nothing is extracted: CTR Nitro-Fueled's DLC only carry the license) into `content.bin`
-  (`BBCONT02`), and the runtime reports them installed from `sceAppContentGetAddcontInfoList`.
-  `BB_DLC=0` / `BB_DLC_DISABLED=label,...` turn them off.
+- **DLC** (optional): the player's own add-on packages (`.pkg`) copied into the selected folder;
+  configure it in the DLC tab and `launcher.ini` as `dlc_dir`. Missing or empty values keep the
+  default `<launcher root>\dlc`; relative values resolve against the launcher root, and the launcher
+  passes the resolved path to `run.py` as `BB_DLC_DIR`. Matching CUSA13795 DLC from an Import PKG
+  folder is copied raw (never extracted, never overwritten): existing files stay untouched and
+  copies report duplicates separately. `scripts/content_profile.py` reads the
+  entitlement labels (package header and `param.sfo`; nothing is extracted because CTR Nitro-Fueled's
+  DLC only carry the license) into `content.bin` (`BBCONT02`), and the runtime reports them installed
+  from `sceAppContentGetAddcontInfoList`. `BB_DLC=0` / `BB_DLC_DISABLED=label,...` turn them off.
 
 A test build with `-DLAUNCHER_SELFTEST` runs the file operations from the command line
 (`--import`, `--restore`, `--patches`, `--dlc`).
@@ -108,9 +131,17 @@ need them.
 ## Portable build
 
 `packaging/windows/make_portable.py` makes the portable ZIP (the file in Releases) from a finished
-build: `sacredfire.exe`, the DLLs it needs (found with `llvm-objdump`), the scripts, default
-`bbport.ini` (windowed, 60 FPS limit), launchers with CRLF line endings, `LICENSE` and a
-`THIRD-PARTY.txt` that names the MSYS2 package and license of every DLL.
+build: `sacredfire.exe`, the DLLs it needs (found with `llvm-objdump`), the scripts
+(`scripts\pkg_import.py` included), default `bbport.ini` (windowed, 60 FPS limit), launchers with
+CRLF line endings, `LICENSE` and a `THIRD-PARTY.txt` that names the MSYS2 package and license of
+every DLL. It also bundles the PKG import extractor: `out\pkg_extractor.exe` (where the launcher
+expects it) with `out\zlib1.dll` and `out\libc++.dll`, plus the shadPS4Plus GPL notice and the
+versioned pin record (`licenses\shadps4plus-pkg-LICENSE.txt`,
+`licenses\shadps4plus-pkg.README.CTR.md`; the extractor sources plus
+`patches\pkg-extractor-0x403-tail.patch` stay in this repository). The ZIP carries no PKGs, game
+files, saves or `user/` data: the player's source packages remain read-only inputs for Import PKG
+folder, and the game-library destination plus per-import `stage-*` directories live outside the
+package.
 
 The [manual build guide](../../docs/MANUAL_BUILDS.md) covers the full packaging sequence and checksum check. Run the packager in the MSYS2 CLANG64 shell:
 
