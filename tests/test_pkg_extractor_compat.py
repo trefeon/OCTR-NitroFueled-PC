@@ -104,6 +104,18 @@ class OwnedPatchTests(unittest.TestCase):
         text = PATCH.read_text(encoding="utf-8")
         self.assertIn("src/core/file_format/pkg.cpp", text)
         self.assertIn("src/core/crypto/crypto.cpp", text)
+        self.assertIn("extractor/main.cpp", text)
+        self.assertIn("src/core/loader.cpp", text)
+
+    def test_patch_touches_only_owned_files(self):
+        files = sorted(line.split(" b/")[1] for line in
+                       PATCH.read_text(encoding="utf-8").splitlines()
+                       if line.startswith("diff --git"))
+        self.assertEqual(files, ["extractor/main.cpp",
+                                 "src/core/crypto/crypto.cpp",
+                                 "src/core/crypto/crypto.h",
+                                 "src/core/file_format/pkg.cpp",
+                                 "src/core/loader.cpp"])
 
     def test_patch_keeps_alignment_guard(self):
         text = PATCH.read_text(encoding="utf-8")
@@ -122,6 +134,23 @@ class OwnedPatchTests(unittest.TestCase):
         self.assertTrue(added, "patch adds no lines")
         for line in added:
             self.assertNotIn("msize", line)
+
+    def test_patch_rejects_invalid_inputs_before_parsing(self):
+        # Real-binary acceptance: truncated headers must fail before any
+        # table seek, and every invalid/unreadable path must exit nonzero.
+        text = PATCH.read_text(encoding="utf-8")
+        for marker in ("PKG header is truncated",
+                       "Invalid PKG header magic",
+                       "PKG table entry is truncated",
+                       "PKG entry range is outside the file",
+                       "PKG table entry range is outside the file",
+                       "PKG is missing param.sfo",
+                       "PSF file has no CATEGORY",
+                       "invalid DLC entitlement label"):
+            self.assertIn(marker, text)
+        added = [line for line in text.splitlines()
+                 if line.startswith("+") and not line.startswith("+++")]
+        self.assertTrue(any(line.lstrip("+").strip() == "return 1;" for line in added))
 
 
 class SubmodulePinTests(unittest.TestCase):
@@ -170,7 +199,14 @@ class BuildWiringTests(unittest.TestCase):
 
 @unittest.skipIf(find_extractor() is None, "no pkg_extractor binary (set PKG_EXTRACTOR)")
 class ExtractorCliTests(unittest.TestCase):
-    """Synthetic invalid-PKG fixtures, mirroring cli_invalid_pkg.cmake."""
+    """Synthetic invalid-PKG fixtures, mirroring cli_invalid_pkg.cmake.
+
+    Requires a patched build: the owned patch makes every invalid path
+    exit 1 with a deterministic message (missing/empty -> invalid-PKG
+    notice, 4-byte magic-only header -> "PKG header is truncated").
+    Rebuild out/pkg_extractor.exe from the pinned submodule plus the owned
+    patch before running (the Task 3 gate rebuilds and copies the exe).
+    """
 
     EXTRACTOR = find_extractor()
     PKG_MAGIC = bytes((0x7F, 0x43, 0x4E, 0x54))  # 0x7F 'C' 'N' 'T', little-endian
@@ -198,12 +234,10 @@ class ExtractorCliTests(unittest.TestCase):
             truncated = tmp / "truncated package.pkg"
             truncated.write_bytes(self.PKG_MAGIC)
             proc = self.run_extractor(truncated, tmp)
+        # Patched parser rejects the short header before any table seek,
+        # so this must exit 1, never crash (baseline access-violated here).
         self.assertEqual(proc.returncode, 1)
-        # Reviewed tree: "PKG header is truncated"; pinned baseline Open
-        # path reports "Cannot open PKG file". Either proves the package
-        # was rejected before any game tree was written.
-        self.assertTrue("PKG header is truncated" in proc.stdout
-                        or "Cannot open PKG file" in proc.stdout, proc.stdout)
+        self.assertIn("PKG header is truncated", proc.stdout)
 
 
 class _workdir:

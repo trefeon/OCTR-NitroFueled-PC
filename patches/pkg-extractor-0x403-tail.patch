@@ -1,3 +1,77 @@
+diff --git a/extractor/main.cpp b/extractor/main.cpp
+index 14e8e53..ee6e96c 100644
+--- a/extractor/main.cpp
++++ b/extractor/main.cpp
+@@ -27,6 +27,7 @@ int main(int argc, char** argv){
+ 		std::string failreason;
+ 		if (!pkg.Open(file, failreason)) {
+             std::cout << "Cannot open PKG file : " << failreason << std::endl;
++            return 1;
+         }else{
+ 		//	std::cout << "open PKG file success" << std::endl;
+ 			
+@@ -34,13 +35,18 @@ int main(int argc, char** argv){
+ 			
+ 			if (!psf.Open(pkg.sfo)) {
+ 				std::cout << "Could not read SFO." << std::endl;
++				return 1;
+ 			}else{
+ 			//	std::cout << "open PSF success" << std::endl;
+ 				
+ 				output_folder_path /= pkg.GetTitleID();
+ 				
+-				std::string category;
+-				category += *psf.GetString("CATEGORY");
++				const auto category_value = psf.GetString("CATEGORY");
++				if (!category_value.has_value() || category_value->empty()) {
++					std::cout << "PSF file has no CATEGORY" << std::endl;
++					return 1;
++				}
++				const std::string category{*category_value};
+ 			//	std::cout << "PSF category = " << category << std::endl;
+ 				
+ 				std::string pkgType = pkg.GetPkgFlags();
+@@ -58,10 +64,15 @@ int main(int argc, char** argv){
+ 					std::string content_id;
+ 					if (auto value = psf.GetString("CONTENT_ID"); value.has_value()) {
+ 						content_id = std::string{*value};
+-						std::string entitlement_label = Common::SplitString(content_id, '-')[2];
+-						output_folder_path /= entitlement_label;
++						const auto content_id_parts = Common::SplitString(content_id, '-');
++						if (content_id_parts.size() < 3 || content_id_parts[2].empty()) {
++							std::cout << "PSF CONTENT_ID has an invalid DLC entitlement label" << std::endl;
++							return 1;
++						}
++						output_folder_path /= content_id_parts[2];
+ 					} else {
+ 						std::cout << "PSF file there is no CONTENT_ID" << std::endl;
++						return 1;
+ 					}
+ 				}else{
+ 					std::cout << "pkg is a base game" << std::endl;
+@@ -77,6 +88,7 @@ int main(int argc, char** argv){
+ 				
+ 				if (!pkg.Extract(file, output_folder_path, failreason)) {
+ 					std::cout << "Cannot extract PKG file : " << failreason << std::endl;
++					return 1;
+ 				} else {
+ 					int nfiles = pkg.GetNumberOfFiles();
+ 					
+@@ -85,6 +97,7 @@ int main(int argc, char** argv){
+ 						std::cout << "\r      Extracting file " << i+1 << " of " << nfiles;
+ 						pkg.ExtractFiles(i);
+ 					}
++					return 0;
+ 				}
+ 			}
+ 		}
+@@ -99,5 +112,5 @@ int main(int argc, char** argv){
+ 		std::cin.get();
+ 	}
+ 	
+-	return 0;
++	return 1;
+ }
 diff --git a/src/core/crypto/crypto.cpp b/src/core/crypto/crypto.cpp
 index 4020edf..ce45053 100644
 --- a/src/core/crypto/crypto.cpp
@@ -66,19 +140,200 @@ index b5d8104..a47f129 100644
                       std::span<CryptoPP::byte, 16> NPcommID, std::span<CryptoPP::byte, 16> efsmIv,
                       std::span<CryptoPP::byte> ciphertext, std::span<CryptoPP::byte> decrypted);
 diff --git a/src/core/file_format/pkg.cpp b/src/core/file_format/pkg.cpp
-index 8ff698f..a0a7c71 100644
+index 8ff698f..b144602 100644
 --- a/src/core/file_format/pkg.cpp
 +++ b/src/core/file_format/pkg.cpp
-@@ -2,6 +2,8 @@
+@@ -1,7 +1,10 @@
+ // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
  // SPDX-License-Identifier: GPL-2.0-or-later
  
- #include <iostream>
 +#include <algorithm>
 +#include <cstddef>
+ #include <iostream>
++#include <limits>
  #include <zlib.h>
  #include "common/io_file.h"
  #include "core/file_format/pkg.h"
-@@ -223,11 +225,18 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
+@@ -40,6 +43,41 @@ u32 GetPFSCOffset(std::span<const u8> pfs_image) {
+     return -1;
+ }
+ 
++namespace {
++// Reads one 32-byte PKG table entry and range-checks its payload before any
++// caller seeks into it or sizes a buffer from it. Rejects short reads and
++// entry ranges outside the file so truncated headers cannot drive OOB access.
++bool ReadTableEntry(const Common::FS::IOFile& file, PKGEntry& entry,
++                     std::string& failreason) {
++    if (file.Read(entry.id) != 1 || file.Read(entry.filename_offset) != 1 ||
++        file.Read(entry.flags1) != 1 || file.Read(entry.flags2) != 1 ||
++        file.Read(entry.offset) != 1 || file.Read(entry.size) != 1 ||
++        !file.Seek(8, Common::FS::SeekOrigin::CurrentPosition)) {
++        failreason = "PKG table entry is truncated";
++        return false;
++    }
++    const u64 entry_offset = entry.offset;
++    const u64 entry_size = entry.size;
++    if (entry_offset > file.GetSize() || entry_size > file.GetSize() - entry_offset) {
++        failreason = "PKG entry range is outside the file";
++        return false;
++    }
++    return true;
++}
++
++bool ValidateTableRange(const PKGHeader& header, u64 file_size, std::string& failreason) {
++    const u64 table_offset = header.pkg_table_entry_offset;
++    const u64 table_count = header.pkg_table_entry_count;
++    if (table_count > std::numeric_limits<u64>::max() / sizeof(PKGEntry) ||
++        table_offset > file_size ||
++        table_count * sizeof(PKGEntry) > file_size - table_offset) {
++        failreason = "PKG table entry range is outside the file";
++        return false;
++    }
++    return true;
++}
++} // namespace
++
+ PKG::PKG() = default;
+ 
+ PKG::~PKG() = default;
+@@ -50,10 +88,31 @@ bool PKG::Open(const std::filesystem::path& filepath, std::string& failreason) {
+         return false;
+     }
+     pkgSize = file.GetSize();
++    if (pkgSize < sizeof(PKGHeader) ||
++        file.ReadRaw<u8>(&pkgheader, sizeof(PKGHeader)) != sizeof(PKGHeader)) {
++        failreason = "PKG header is truncated";
++        return false;
++    }
+ 
+-    file.Read(pkgheader);
+-    if (pkgheader.magic != 0x7F434E54)
++    if (pkgheader.magic != 0x7F434E54) {
++        failreason = "Invalid PKG header magic";
+         return false;
++    }
++
++    const u64 declared_size = pkgheader.pkg_size;
++    const u64 content_offset = pkgheader.pkg_content_offset;
++    const u64 content_size = pkgheader.pkg_content_size;
++    if (declared_size > pkgSize) {
++        failreason = "PKG file size is different";
++        return false;
++    }
++    if (content_offset > declared_size || content_size > declared_size - content_offset) {
++        failreason = "Content size is bigger than pkg size";
++        return false;
++    }
++    if (!ValidateTableRange(pkgheader, pkgSize, failreason)) {
++        return false;
++    }
+ 
+     for (const auto& flag : flagNames) {
+         if (isFlagSet(pkgheader.pkg_content_flags, flag.first)) {
+@@ -64,8 +123,11 @@ bool PKG::Open(const std::filesystem::path& filepath, std::string& failreason) {
+     }
+ 
+     // Find title id it is part of pkg_content_id starting at offset 0x40
+-    file.Seek(0x47); // skip first 7 characters of content_id
+-    file.Read(pkgTitleID);
++    // (skip first 7 characters of content_id).
++    if (!file.Seek(0x47) || file.Read(pkgTitleID) != sizeof(pkgTitleID)) {
++        failreason = "Failed to read PKG title ID";
++        return false;
++    }
+ 
+     u32 offset = pkgheader.pkg_table_entry_offset;
+     u32 n_files = pkgheader.pkg_table_entry_count;
+@@ -77,13 +139,9 @@ bool PKG::Open(const std::filesystem::path& filepath, std::string& failreason) {
+ 
+     for (int i = 0; i < n_files; i++) {
+         PKGEntry entry{};
+-        file.Read(entry.id);
+-        file.Read(entry.filename_offset);
+-        file.Read(entry.flags1);
+-        file.Read(entry.flags2);
+-        file.Read(entry.offset);
+-        file.Read(entry.size);
+-        file.Seek(8, Common::FS::SeekOrigin::CurrentPosition);
++        if (!ReadTableEntry(file, entry, failreason)) {
++            return false;
++        }
+ 
+         // Try to figure out the name
+         const auto name = GetEntryNameByType(entry.id);
+@@ -94,9 +152,17 @@ bool PKG::Open(const std::filesystem::path& filepath, std::string& failreason) {
+                 return false;
+             }
+             sfo.resize(entry.size);
+-            file.ReadRaw<u8>(sfo.data(), entry.size);
++            if (file.ReadRaw<u8>(sfo.data(), entry.size) != entry.size) {
++                failreason = "param.sfo entry is truncated";
++                sfo.clear();
++                return false;
++            }
+         }
+     }
++    if (sfo.empty()) {
++        failreason = "PKG is missing param.sfo";
++        return false;
++    }
+     file.Close();
+ 
+     return true;
+@@ -111,19 +177,31 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
+         return false;
+     }
+     pkgSize = file.GetSize();
+-    file.ReadRaw<u8>(&pkgheader, sizeof(PKGHeader));
++    if (pkgSize < sizeof(PKGHeader) ||
++        file.ReadRaw<u8>(&pkgheader, sizeof(PKGHeader)) != sizeof(PKGHeader)) {
++        failreason = "PKG header is truncated";
++        return false;
++    }
+ 
+-    if (pkgheader.magic != 0x7F434E54)
++    if (pkgheader.magic != 0x7F434E54) {
++        failreason = "Invalid PKG header magic";
+         return false;
++    }
+ 
+-    if (pkgheader.pkg_size > pkgSize) {
++    const u64 declared_size = pkgheader.pkg_size;
++    const u64 content_offset = pkgheader.pkg_content_offset;
++    const u64 content_size = pkgheader.pkg_content_size;
++    if (declared_size > pkgSize) {
+         failreason = "PKG file size is different";
+         return false;
+     }
+-    if ((pkgheader.pkg_content_size + pkgheader.pkg_content_offset) > pkgheader.pkg_size) {
++    if (content_offset > declared_size || content_size > declared_size - content_offset) {
+         failreason = "Content size is bigger than pkg size";
+         return false;
+     }
++    if (!ValidateTableRange(pkgheader, pkgSize, failreason)) {
++        return false;
++    }
+ 
+     u32 offset = pkgheader.pkg_table_entry_offset;
+     u32 n_files = pkgheader.pkg_table_entry_count;
+@@ -141,13 +219,9 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
+ 
+     for (int i = 0; i < n_files; i++) {
+         PKGEntry entry{};
+-        file.Read(entry.id);
+-        file.Read(entry.filename_offset);
+-        file.Read(entry.flags1);
+-        file.Read(entry.flags2);
+-        file.Read(entry.offset);
+-        file.Read(entry.size);
+-        file.Seek(8, Common::FS::SeekOrigin::CurrentPosition);
++        if (!ReadTableEntry(file, entry, failreason)) {
++            return false;
++        }
+ 
+         auto currentPos = file.Tell();
+ 
+@@ -223,11 +297,18 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
          // Decrypt Np stuff and overwrite.
          if (entry.id == 0x400 || entry.id == 0x401 || entry.id == 0x402 ||
              entry.id == 0x403) { // somehow 0x401 is not decrypting
@@ -102,7 +357,7 @@ index 8ff698f..a0a7c71 100644
              if (!file.Seek(entry.offset)) {
                  failreason = "Failed to seek to PKG entry offset";
                  return false;
-@@ -237,14 +246,15 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
+@@ -237,14 +318,15 @@ bool PKG::Extract(const std::filesystem::path& filepath, const std::filesystem::
              data.resize(entry.size);
              file.ReadRaw<u8>(data.data(), entry.size);
  
@@ -121,3 +376,21 @@ index 8ff698f..a0a7c71 100644
              Common::FS::IOFile out(extract_path / "sce_sys" / name,
                                     Common::FS::FileAccessMode::Write);
              out.Write(decNp);
+diff --git a/src/core/loader.cpp b/src/core/loader.cpp
+index f80bfbb..7173a8c 100644
+--- a/src/core/loader.cpp
++++ b/src/core/loader.cpp
+@@ -15,8 +15,11 @@ FileTypes DetectFileType(const std::filesystem::path& filepath) {
+     Common::FS::IOFile file;
+     file.Open(filepath, Common::FS::FileAccessMode::Read);
+     file.Seek(0);
+-    u32 magic;
+-    file.Read(magic);
++    u32 magic{};
++    if (!file.Read(magic)) {
++        file.Close();
++        return FileTypes::Unknown;
++    }
+     file.Close();
+     switch (magic) {
+     case PkgMagic:

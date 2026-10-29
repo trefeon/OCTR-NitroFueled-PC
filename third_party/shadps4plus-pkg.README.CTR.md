@@ -32,8 +32,12 @@
   past the end of the data buffer; the patch decrypts the largest aligned
   prefix with the existing CBC routine and carries the short tail through
   verbatim. The alignment guard is kept for every other encrypted NP entry.
-- Only `src/core/file_format/pkg.cpp` (validation) and
-  `src/core/crypto/crypto.cpp` / `crypto.h` (tail-safe decrypt) are touched.
+- Touches `src/core/file_format/pkg.cpp` (header/table/entry bounds checks
+  plus the 0x403 tail-safe decrypt), `src/core/crypto/crypto.{h,cpp}`
+  (tail-safe decrypt helper), `extractor/main.cpp` (exit 1 on every
+  invalid/unreadable path; check-type 101/102/103 and success 0 preserved),
+  and `src/core/loader.cpp` (unreadable magic is Unknown, never UB).
+  No other upstream files are carried.
 
 ## License
 
