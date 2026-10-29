@@ -172,7 +172,7 @@ if (WIN32 AND BB_BUILD_PKG_EXTRACTOR)
             add_custom_command(
                 OUTPUT "${BB_CRYPTOPP_LIB}"
                 COMMAND "${BB_MAKE_PROGRAM}" -C "${BB_PKG_EXTRACTOR_SOURCE}/externals/cryptopp"
-                    -f GNUmakefile libcryptopp.a
+                    -f GNUmakefile "CXX=${CMAKE_CXX_COMPILER}" libcryptopp.a
                 COMMAND ${CMAKE_COMMAND} -E copy
                     "${BB_PKG_EXTRACTOR_SOURCE}/externals/cryptopp/libcryptopp.a"
                     "${BB_CRYPTOPP_LIB}"
