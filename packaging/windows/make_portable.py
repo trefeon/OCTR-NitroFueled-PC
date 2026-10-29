@@ -360,7 +360,7 @@ def main():
         for path in sorted(folder.rglob('*')):
             if path.is_file():  # forward slashes in the entry names, as the ZIP format asks
                 z.write(path, f'{NAME}/{path.relative_to(folder).as_posix()}')
-    digest = hashlib.sha256(archive.read_bytes()).hexdigest().upper()
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     print(f'{archive}  {archive.stat().st_size / 1e6:.1f} MB  {len(dlls)} DLLs  {version}'
           f'{"  with DLSS" if dlss_files else ""}')
     print(f'SHA256 {digest}')

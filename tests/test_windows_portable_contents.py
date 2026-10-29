@@ -1,4 +1,8 @@
 """Windows portable package contents, assembled from synthetic files without external tools."""
+import hashlib
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import types
@@ -154,6 +158,23 @@ class WindowsPortableContents(unittest.TestCase):
             self.assertFalse(any("CUSA13795" in n for n in names),
                              "portable ZIP must not bundle game files")
             self.assertFalse(any(n.startswith(prefix + "CUSA") for n in names))
+
+    def test_sha256_file_matches_zip_and_checks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, dist, dxc, clang_bin, portable_dir = _stage_source(temp)
+            archive = _run_packager(root, dist, dxc, clang_bin, portable_dir)
+            expected = hashlib.sha256(archive.read_bytes()).hexdigest()
+            checksum_file = dist / f"{archive.name}.sha256"
+            recorded, _, filename = checksum_file.read_text(encoding="utf-8").partition("  ")
+            self.assertEqual(filename.strip(), archive.name)
+            self.assertRegex(recorded, r"\A[0-9a-f]{64}\Z",
+                             "checksum must be lowercase hex for sha256sum --check")
+            self.assertEqual(recorded, expected)
+            if shutil.which("sha256sum") is not None:
+                proc = subprocess.run(["sha256sum", "--check", checksum_file.name],
+                                      capture_output=True, text=True, cwd=str(dist))
+                self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+                self.assertIn(f"{archive.name}: OK", proc.stdout)
 
 
 if __name__ == "__main__":
