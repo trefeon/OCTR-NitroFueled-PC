@@ -364,7 +364,7 @@ def main():
     print(f'{archive}  {archive.stat().st_size / 1e6:.1f} MB  {len(dlls)} DLLs  {version}'
           f'{"  with DLSS" if dlss_files else ""}')
     print(f'SHA256 {digest}')
-    (a.dist / f'{archive.name}.sha256').write_bytes(f'{digest}  {archive.name}\n'.encode('ascii'))
+    (a.dist / f'{archive.name}.sha256').write_bytes(f'{digest} *{archive.name}\n'.encode('ascii'))
 
 
 if __name__ == '__main__':

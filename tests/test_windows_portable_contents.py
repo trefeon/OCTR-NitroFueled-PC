@@ -168,8 +168,8 @@ class WindowsPortableContents(unittest.TestCase):
             raw = checksum_file.read_bytes()
             self.assertNotIn(b"\r", raw,
                              "sidecar must use LF line endings for sha256sum --check")
-            self.assertEqual(raw, f"{expected}  {archive.name}\n".encode("ascii"))
-            recorded, _, filename = checksum_file.read_text(encoding="utf-8").partition("  ")
+            self.assertEqual(raw, f"{expected} *{archive.name}\n".encode("ascii"))
+            recorded, _, filename = checksum_file.read_text(encoding="utf-8").partition(" *")
             self.assertEqual(filename.strip(), archive.name)
             self.assertRegex(recorded, r"\A[0-9a-f]{64}\Z",
                              "checksum must be lowercase hex for sha256sum --check")
