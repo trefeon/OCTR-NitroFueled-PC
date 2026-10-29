@@ -165,6 +165,10 @@ class WindowsPortableContents(unittest.TestCase):
             archive = _run_packager(root, dist, dxc, clang_bin, portable_dir)
             expected = hashlib.sha256(archive.read_bytes()).hexdigest()
             checksum_file = dist / f"{archive.name}.sha256"
+            raw = checksum_file.read_bytes()
+            self.assertNotIn(b"\r", raw,
+                             "sidecar must use LF line endings for sha256sum --check")
+            self.assertEqual(raw, f"{expected}  {archive.name}\n".encode("ascii"))
             recorded, _, filename = checksum_file.read_text(encoding="utf-8").partition("  ")
             self.assertEqual(filename.strip(), archive.name)
             self.assertRegex(recorded, r"\A[0-9a-f]{64}\Z",
