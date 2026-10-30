@@ -118,6 +118,18 @@ with a nickname keeps it, through the key in `ryunet_online.key` (copied to
 **Playing offline:** turn online off in the launcher's Online tab, or set `BB_ONLINE=0`. The
 server address can be changed there too, to play on your own RyuNET server.
 
+**Your own server (local development):** `scripts/ryunet_server.py` is a minimal
+RyuNET-compatible server in stdlib-only Python (no dependencies). Start it with one command:
+
+    python scripts/ryunet_server.py --port 8080
+
+then point the launcher's Online tab at it (Server: `127.0.0.1:8080`, your nickname, Online
+on) or set `online_server=127.0.0.1` + `online_http_port=8080` in bbport.ini. It serves the
+season theme, nickname claims (first claim wins, kept in `ryunet_local.json`) and the friends
+endpoints the game calls, and stubs the Demonware auth/lobby traffic so the online menus and
+private rooms are reachable. Public matchmaking population and UDP relays are out of scope:
+a lone server has nobody to match with. See the script's docstring for what is real vs stubbed.
+
 **Connection problems:** the game connects players directly to each other (UDP port 3074), as
 on the PS4. Some home connections (strict NAT, mobile data, carrier-grade NAT) cannot reach some
 other players. If a match keeps failing with the same people, enabling UPnP on your router or
