@@ -686,6 +686,14 @@ struct DlcInfo {
 
 enum class Job { None, Merge, Check, Play, PkgImport };
 
+/// Determinate PKG-import progress, parsed from the importer's stdout in the
+/// log-worker thread: the extractor already prints per-file
+/// "Extracting file i of n" lines (restarting its count per PKG) and the
+/// importer already prints STAGING=/merge-report/check/DLC markers, so no
+/// engine or script changes are needed. Phases are stored as the enum's int;
+/// formatting stays on the UI thread via T().
+enum class PkgPhase { Classifying, ExtractingBase, ExtractingUpdate, Merging, Checking, CopyingDlc };
+
 struct App {
     HWND hwnd = nullptr;
     int active_page = 0;
@@ -715,6 +723,13 @@ struct App {
     HANDLE pkg_import_job = nullptr;  // kills the whole importer tree on cancel
     std::vector<std::string> pkg_import_log;  // guarded by mutex
     std::string pkg_import_staging, pkg_import_merged;  // guarded by mutex
+    // Determinate import progress, parsed by the log-worker thread from the
+    // markers above (atomics: the UI thread only reads). pkg_extracts counts
+    // "Extracting pkg to" lines so the per-PKG file count resets to the right
+    // phase (first PKG = base, later ones = update).
+    std::atomic<int> pkg_phase{int(PkgPhase::Classifying)};
+    std::atomic<size_t> pkg_current{0}, pkg_total{0};
+    std::atomic<int> pkg_extracts{0};
     // Auto-import UX: a picked PKG folder awaiting inline confirm, and its scan.
     fs::path pkg_pending_src;   // empty = no pre-flight showing
     fs::path pkg_library_dir;   // empty = <launcher_root>/games
@@ -1587,6 +1602,52 @@ fs::path DlcRoot();  // the configured DLC folder (defined with the DLC tab)
 bool UpdateBusy();     // whether the updater is working (defined with the updater tab)
 void PollPkgScan();    // background PKG pre-flight scan (defined with ScanPkgFolder)
 
+/// Update the determinate-import atomics from one importer output segment.
+/// Runs in the PkgImport log-worker thread: atomics only, never T() (the
+/// locale is UI-thread state) and never the log (the caller owns it). Unknown
+/// totals stay hidden: the bar only appears once an "of n" line sets one.
+void ParsePkgImportProgress(const std::string& seg) {
+    App& app = g_app;
+    if (seg.rfind("STAGING=", 0) == 0) {
+        app.pkg_phase.store(int(PkgPhase::Classifying));
+        return;
+    }
+    if (seg.rfind("MERGED_DIR=", 0) == 0) return;  // the finish path reports Game-ready
+    if (seg.rfind("Extracting pkg to", 0) == 0) {
+        // The extractor restarts its file count per PKG: the first PKG is the
+        // base, later ones the update; totals reset until the first "of n".
+        const int seen = app.pkg_extracts.fetch_add(1);
+        app.pkg_phase.store(int(seen == 0 ? PkgPhase::ExtractingBase : PkgPhase::ExtractingUpdate));
+        app.pkg_current.store(0);
+        app.pkg_total.store(0);
+        return;
+    }
+    if (seg.rfind("Extracting file ", 0) == 0) {
+        unsigned long long i = 0, n = 0;
+        if (std::sscanf(seg.c_str() + sizeof("Extracting file ") - 1, "%llu of %llu", &i, &n) == 2 &&
+            n > 0) {
+            // A stray progress line before any "Extracting pkg to" still belongs to the base.
+            if (PkgPhase(app.pkg_phase.load()) == PkgPhase::Classifying)
+                app.pkg_phase.store(int(PkgPhase::ExtractingBase));
+            app.pkg_current.store(size_t(i));
+            app.pkg_total.store(size_t(n));
+        }
+        return;
+    }
+    if (seg.rfind("Merged ", 0) == 0) {  // tools/merge_update.py's report: merge done
+        app.pkg_phase.store(int(PkgPhase::Merging));
+        return;
+    }
+    if (seg.rfind("DLC", 0) == 0) {  // copy_dlc_raw per-file lines and its summary
+        app.pkg_phase.store(int(PkgPhase::CopyingDlc));
+        return;
+    }
+    // The game-check profile line lands between the merge report and the DLC
+    // copies; any other line once merging reported means the check is running.
+    if (PkgPhase(app.pkg_phase.load()) == PkgPhase::Merging && seg.rfind("ERROR", 0) != 0)
+        app.pkg_phase.store(int(PkgPhase::Checking));
+}
+
 /// A PKG folder (one CUSA13795 base, one 1.21 update, optional matching DLC) -> a new validated
 /// install, via scripts/pkg_import.py as a child process with streamed output. Cancellation
 /// kills the importer's job object (importer plus any extractor grandchildren); the script
@@ -1605,6 +1666,10 @@ void StartPkgImport(const fs::path& pkg_dir, const fs::path& dest_dir) {
         a.pkg_import_staging.clear();
         a.pkg_import_merged.clear();
     }
+    a.pkg_phase.store(int(PkgPhase::Classifying));
+    a.pkg_current.store(0);
+    a.pkg_total.store(0);
+    a.pkg_extracts.store(0);
     const fs::path script = LauncherPaths::PkgImportPaths::Script(a.root);
     std::wstring cmd =
         Quote(a.python->exe) + L" " + a.python->args + L"-X utf8 " + Quote(script.wstring()) + L" " +
@@ -1659,6 +1724,12 @@ void StartPkgImport(const fs::path& pkg_dir, const fs::path& dest_dir) {
                 const std::string line = Trim(pending.substr(0, nl));
                 pending.erase(0, nl + 1);
                 if (line.empty()) continue;
+                // Progress updates may ride \r-joined inside one \n chunk (the
+                // extractor overwrites its per-file line): parse the latest.
+                std::string seg = line;
+                if (const size_t cr = seg.find_last_of('\r'); cr != std::string::npos)
+                    seg = Trim(seg.substr(cr + 1));
+                ParsePkgImportProgress(seg);
                 std::scoped_lock lock{app.mutex};
                 if (line.rfind("STAGING=", 0) == 0) app.pkg_import_staging = line.substr(8);
                 else if (line.rfind("MERGED_DIR=", 0) == 0) app.pkg_import_merged = line.substr(11);
@@ -1670,6 +1741,10 @@ void StartPkgImport(const fs::path& pkg_dir, const fs::path& dest_dir) {
         if (!pending.empty()) {
             const std::string line = Trim(pending);
             if (!line.empty()) {
+                std::string seg = line;
+                if (const size_t cr = seg.find_last_of('\r'); cr != std::string::npos)
+                    seg = Trim(seg.substr(cr + 1));
+                ParsePkgImportProgress(seg);
                 std::scoped_lock lock{app.mutex};
                 app.pkg_import_log.push_back(line);
             }
@@ -3223,6 +3298,27 @@ void PlayTab() {
         }
         if (a.job == Job::PkgImport) {
             ImGui::TextColored(kYellow, "%s", T("Importando PKGs...", "Importing PKGs..."));
+            const PkgPhase phase = PkgPhase(a.pkg_phase.load());
+            const char* phase_text = nullptr;
+            switch (phase) {
+                case PkgPhase::ExtractingBase: phase_text = T("Extrayendo juego base...", "Extracting base game..."); break;
+                case PkgPhase::ExtractingUpdate: phase_text = T("Extrayendo actualización...", "Extracting update..."); break;
+                case PkgPhase::Merging: phase_text = T("Fusionando actualización...", "Merging update..."); break;
+                case PkgPhase::Checking: phase_text = T("Verificando juego...", "Checking game..."); break;
+                case PkgPhase::CopyingDlc: phase_text = T("Copiando DLC...", "Copying DLC..."); break;
+                default: phase_text = T("Clasificando PKGs...", "Classifying PKGs..."); break;
+            }
+            ImGui::TextColored(kGrey, "%s", phase_text);
+            const size_t cur = a.pkg_current.load(), tot = a.pkg_total.load();
+            const bool extracting = phase == PkgPhase::ExtractingBase || phase == PkgPhase::ExtractingUpdate;
+            if (extracting && tot > 0) {
+                char overlay[64];
+                std::snprintf(overlay, sizeof overlay, "%zu / %zu", cur, tot);
+                ImGui::ProgressBar(float(cur) / float(tot), ImVec2(-FLT_MIN, 0), overlay);
+                char files[128];
+                std::snprintf(files, sizeof files, T("Archivo %zu de %zu", "File %zu of %zu"), cur, tot);
+                ImGui::TextColored(kGrey, "%s", files);
+            }
             std::string last;
             {
                 std::scoped_lock lock{a.mutex};
