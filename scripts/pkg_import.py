@@ -26,7 +26,9 @@ Prints ``STAGING=<dir>`` first (so a caller that kills this process can clean
 it) and ``MERGED_DIR=<dir>`` last on success.
 """
 import argparse
+import codecs
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -160,6 +162,48 @@ _SFO_CANDIDATES = ("sce_sys/param.sfo", "Sc0/param.sfo",
                    "Image0/sce_sys/param.sfo")
 
 
+def _drain_extractor(proc, pkg, log, cancel):
+    """Forward the extractor child's stdout to log, split on CR and LF.
+
+    The extractor overwrites its per-file progress line with a bare CR and
+    never flushes, so text line iteration would stall each segment until the
+    next LF or EOF: read chunks and split on both CR and LF (one CRLF is one
+    break, as with universal newlines), forwarding every complete segment as
+    its own log line. The still-growing tail is forwarded too, so progress is
+    visible while the child runs; a segment identical to the one already shown
+    is never repeated. A set cancel event terminates the child and raises
+    Cancelled, as before.
+    """
+    decode = codecs.getincrementaldecoder("utf-8")().decode
+    buf = ""
+    shown = None
+    name = Path(pkg).name
+
+    def emit(segment):
+        nonlocal shown
+        if segment != shown:
+            _log(segment, log)
+            shown = segment
+        if cancel is not None and cancel.is_set():
+            proc.terminate()
+            raise Cancelled(f"extraction of {name} cancelled")
+
+    while True:
+        chunk = proc.stdout.read1(64 * 1024)
+        if not chunk:
+            break
+        buf += decode(chunk)
+        parts = re.split(r"\r\n|\r|\n", buf)
+        buf = parts.pop()
+        for segment in parts:
+            emit(segment)
+        if buf:
+            emit(buf)  # live tail: progress visible before its terminator
+    tail = buf + decode(b"", final=True)
+    if tail:
+        emit(tail)
+
+
 def extract_stage(extractor, pkg, out_dir, log=None, cancel=None):
     """Extract one PKG below out_dir; return the extracted game directory.
 
@@ -171,16 +215,11 @@ def extract_stage(extractor, pkg, out_dir, log=None, cancel=None):
     before = {p.name for p in out_dir.iterdir()}
     cmd = _extractor_cmd(extractor) + [str(pkg), str(out_dir)]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                            text=True)
+                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
     try:
         assert proc.stdout is not None
         try:
-            for line in proc.stdout:
-                _log(line.rstrip("\n"), log)
-                if cancel is not None and cancel.is_set():
-                    proc.terminate()
-                    raise Cancelled(f"extraction of {Path(pkg).name} cancelled")
+            _drain_extractor(proc, pkg, log=log, cancel=cancel)
             rc = proc.wait()
         finally:
             proc.stdout.close()

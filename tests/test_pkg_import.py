@@ -119,6 +119,57 @@ if not (Path(sys.argv[1]) / "eboot.bin").is_file():
 print("ctr")
 """
 
+CHATTY_EXTRACTOR = """\
+import os
+import struct
+import sys
+import time
+from pathlib import Path
+
+
+def pkg_sfo(path):
+    data = Path(path).read_bytes()
+    if data[:4] != b"\\x7fCNT":
+        return None
+    (count,) = struct.unpack_from(">I", data, 0x10)
+    (table,) = struct.unpack_from(">I", data, 0x18)
+    for i in range(count):
+        e = table + i * 32
+        (eid,) = struct.unpack_from(">I", data, e)
+        if eid != 0x1000:
+            continue
+        (flags,) = struct.unpack_from(">I", data, e + 8)
+        if flags & 0x80000000:
+            return None
+        (off,) = struct.unpack_from(">I", data, e + 16)
+        (size,) = struct.unpack_from(">I", data, e + 20)
+        return data[off:off + size]
+    return None
+
+
+total = int(os.environ.get("CHATTY_FILES", "2000"))
+sentinel = os.environ.get("CHATTY_SENTINEL", "")
+print("Extracting pkg to " + sys.argv[2], flush=True)
+# The real extractor overwrites one console line per file with a bare CR and
+# never flushes. The single flush below stands in for the libc buffer flush
+# that happens mid-run once output exceeds the stdio buffer; the loop itself
+# never flushes, like the real extractor.
+sys.stdout.write("\\r      Extracting file 1 of %d" % total)
+sys.stdout.flush()
+if sentinel:
+    Path(sentinel).touch()
+time.sleep(4)
+for i in range(2, total + 1):
+    sys.stdout.write("\\r      Extracting file %d of %d" % (i, total))
+sys.stdout.write("\\n")
+print("all done", flush=True)
+sfo = pkg_sfo(sys.argv[1])
+out = Path(sys.argv[2]) / "CUSA13795"
+(out / "sce_sys").mkdir(parents=True, exist_ok=True)
+(out / "sce_sys" / "param.sfo").write_bytes(sfo)
+(out / "eboot.bin").write_bytes(b"FAKEEBOOT:chatty")
+"""
+
 
 def build_sfo(entries):
     keys = b""
@@ -645,6 +696,78 @@ class PkgImportTests(unittest.TestCase):
                     [sys.executable, str(slow)], d / "CUSA13795-base.pkg",
                     out, log=lambda line: None, cancel=cancel)
         self._extract_and_check_warnings(run)
+
+    # -- Fix round: CR-split incremental progress forwarding -------------------
+    # The real extractor overwrites one console line per file with a bare CR
+    # and never flushes: extract_stage must forward each CR-separated segment
+    # as its own log line while the child is still running (chunk reads split
+    # on both CR and LF), not only when a newline or EOF arrives.
+    def test_extract_forwards_cr_progress_before_exit(self):
+        import threading
+        import time
+        total = 2000
+        chatty = self.root / "chatty_extractor.py"
+        chatty.write_text(CHATTY_EXTRACTOR)
+        sentinel = self.root / "chatty-flushed"
+        if sentinel.exists():
+            sentinel.unlink()
+        os.environ["CHATTY_FILES"] = str(total)
+        os.environ["CHATTY_SENTINEL"] = str(sentinel)
+        d = self.pkg_dir(("CUSA13795-base.pkg", BASE_SFO))
+        out = self.root / "out-chatty"
+        lines = []
+        errors = []
+
+        def run():
+            def target():
+                try:
+                    pkg_import.extract_stage(
+                        [sys.executable, str(chatty)],
+                        d / "CUSA13795-base.pkg", out,
+                        log=lines.append)
+                except Exception as e:  # noqa: BLE001 - surfaced below
+                    errors.append(e)
+            worker = threading.Thread(target=target)
+            worker.start()
+            try:
+                deadline = time.time() + 15
+                while not sentinel.exists():
+                    if not worker.is_alive():
+                        break
+                    if time.time() > deadline:
+                        break
+                    time.sleep(0.05)
+                self.assertTrue(sentinel.exists(), "chatty extractor flushed")
+                # The first progress segment was flushed before the sentinel
+                # while the child kept running: it must already be logged.
+                deadline = time.time() + 3
+                while (f"      Extracting file 1 of {total}" not in lines
+                       and time.time() < deadline):
+                    time.sleep(0.05)
+                self.assertIn(f"      Extracting file 1 of {total}", lines,
+                              "CR progress forwarded while child runs")
+            finally:
+                worker.join(30)
+                self.assertFalse(worker.is_alive(), "extractor did not exit")
+            self.assertEqual(errors, [])
+            # Post-exit every file arrived exactly once. Mid-chunk flush cuts
+            # can additionally surface a truncated tail line (e.g. "of 200"
+            # for a 2000-file run); only lines with the full total count.
+            prefix = "      Extracting file "
+            suffix = f" of {total}"
+            ids = sorted(int(line[len(prefix):-len(suffix)])
+                         for line in lines
+                         if line.startswith(prefix)
+                         and line.endswith(suffix)
+                         and line[len(prefix):-len(suffix)].isdigit())
+            self.assertEqual(ids, list(range(1, total + 1)))
+            return out
+        try:
+            self._extract_and_check_warnings(run)
+        finally:
+            os.environ.pop("CHATTY_FILES", None)
+            os.environ.pop("CHATTY_SENTINEL", None)
+        self.assertTrue((out / "CUSA13795" / "eboot.bin").is_file())
 
 
 if __name__ == "__main__":

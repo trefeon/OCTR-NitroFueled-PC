@@ -687,11 +687,11 @@ struct DlcInfo {
 enum class Job { None, Merge, Check, Play, PkgImport };
 
 /// Determinate PKG-import progress, parsed from the importer's stdout in the
-/// log-worker thread: the extractor already prints per-file
-/// "Extracting file i of n" lines (restarting its count per PKG) and the
-/// importer already prints STAGING=/merge-report/check/DLC markers, so no
-/// engine or script changes are needed. Phases are stored as the enum's int;
-/// formatting stays on the UI thread via T().
+/// log-worker thread: the extractor emits per-file \r-separated segments with
+/// no flush (restarting its count per PKG); scripts/pkg_import.py
+/// extract_stage forwards each segment as its own line, and the importer
+/// already prints STAGING=/merge-report/check/DLC markers. Phases are stored
+/// as the enum's int; formatting stays on the UI thread via T().
 enum class PkgPhase { Classifying, ExtractingBase, ExtractingUpdate, Merging, Checking, CopyingDlc };
 
 struct App {
@@ -3309,7 +3309,9 @@ void PlayTab() {
                 default: phase_text = T("Clasificando PKGs...", "Classifying PKGs..."); break;
             }
             ImGui::TextColored(kGrey, "%s", phase_text);
-            const size_t cur = a.pkg_current.load(), tot = a.pkg_total.load();
+            size_t cur = a.pkg_current.load();
+            const size_t tot = a.pkg_total.load();
+            if (cur > tot) cur = tot;  // a truncated live-tail segment never overfills the bar
             const bool extracting = phase == PkgPhase::ExtractingBase || phase == PkgPhase::ExtractingUpdate;
             if (extracting && tot > 0) {
                 char overlay[64];
