@@ -3,8 +3,12 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
 #include <unordered_map>
 #include <utility>
+#include <vector>
+
 #include <boost/container_hash/hash.hpp>
 
 #include "common/types.h"
@@ -19,6 +23,43 @@ namespace VideoCore {
 
 struct ImageInfo;
 struct Image;
+
+// Threads per tiling compute group (tiling.comp local_size_x). One group processes
+// 64 texels, so a dispatch of N groups covers N*64 texels starting at its base.
+inline constexpr u32 kTilingThreadsPerGroup = 64;
+// Upper bound for a single tiling vkCmdDispatch groupCountX. Vulkan only guarantees
+// maxComputeWorkGroupCount[0] >= 65535, so larger dispatches are split into several
+// legal dispatches with a base-texel push constant (never clamped/dropped).
+inline constexpr u32 kMaxTilingGroupsX = 65536;
+
+struct TilingDispatch {
+    u32 base_texel = 0;
+    u32 group_count = 0;
+};
+
+// Split dim_x groups into legal dispatches covering every texel exactly once.
+// Fast path: dim_x <= max_groups returns a single dispatch.
+// Header-inline so unit tests exercise the exact production logic without linking
+// the GPU backend.
+inline std::vector<TilingDispatch> SplitTilingDispatch(u32 dim_x,
+                                                       u32 max_groups = kMaxTilingGroupsX) {
+    if (max_groups == 0) {
+        max_groups = kMaxTilingGroupsX;
+    }
+    std::vector<TilingDispatch> out;
+    if (dim_x <= max_groups) {
+        out.push_back({.base_texel = 0, .group_count = dim_x});
+        return out;
+    }
+    u32 groups_done = 0;
+    while (groups_done < dim_x) {
+        const u32 count = std::min(dim_x - groups_done, max_groups);
+        out.push_back({.base_texel = groups_done * kTilingThreadsPerGroup,
+                       .group_count = count});
+        groups_done += count;
+    }
+    return out;
+}
 
 class TileManager {
     struct TilingKey {
@@ -64,6 +105,7 @@ private:
     Vulkan::Scheduler& scheduler;
     Vulkan::Runtime& runtime;
     StreamBuffer& stream_buffer;
+    u32 max_tiling_groups_x = kMaxTilingGroupsX;
     vk::UniqueDescriptorSetLayout desc_layout;
     vk::UniquePipelineLayout pl_layout;
     std::unordered_map<TilingKey, vk::UniquePipeline, TilingKey::Hash> tiling_pipelines;

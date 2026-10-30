@@ -440,6 +440,20 @@ target_include_directories(camera-motion-test PRIVATE shim shadps4 ${SHADER_INCL
 target_compile_options(camera-motion-test PRIVATE -UNDEBUG -fPIC)
 target_link_libraries(camera-motion-test PRIVATE bbgpu)
 add_dependencies(camera-motion-test host_shaders)
+if (WIN32)
+    # Same system libs as sacredfire: onecore (CreateFileMapping2 in io_file),
+    # -pthread (clock_gettime/pthreads in diagnostics and buffer cache).
+    target_link_libraries(motion-shader-test PRIVATE onecore -pthread)
+    target_link_libraries(scene-resolution-test PRIVATE onecore -pthread)
+    target_link_libraries(taa-shader-test PRIVATE onecore -pthread)
+    target_link_libraries(camera-motion-test PRIVATE onecore -pthread)
+endif()
+
+# Tiling dispatch splitter: header-inline pure logic, needs no Vulkan device,
+# game image, or GPU backend link.
+add_executable(tiling-dispatch-test EXCLUDE_FROM_ALL ../tests/test_tiling_dispatch.cpp)
+target_include_directories(tiling-dispatch-test PRIVATE shim shadps4)
+target_compile_options(tiling-dispatch-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 
 # Hardware-matched recommended settings: the launcher's pure tier mapping
 # (launcher/windows/hw_recommend.h); header-only, builds on any host.

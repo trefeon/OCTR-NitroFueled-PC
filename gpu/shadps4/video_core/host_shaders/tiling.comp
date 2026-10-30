@@ -106,6 +106,13 @@ layout (set = 0, binding = 2, scalar) uniform TilingInfo {
     MipInfo mips[16];
 } info;
 
+// Base-texel offset for multi-dispatch tiling. Large images are split into several
+// legal dispatches (groupCountX <= 65536); each dispatch adds its base to the global
+// invocation index so every texel is processed exactly once.
+layout(push_constant) uniform Push {
+    uint base_texel;
+} pc;
+
 uint32_t ComputePixelIndexWithinMicroTile(uint32_t x, uint32_t y, uint32_t z, uint32_t thickness) {
     uint32_t p0 = 0;
     uint32_t p1 = 0;
@@ -425,7 +432,8 @@ uint GetMipLevel(inout uint texel) {
 }
 
 void main() {
-    uint texel = gl_GlobalInvocationID.x;
+    uint global = gl_GlobalInvocationID.x + pc.base_texel;
+    uint texel = global;
     uint mip = GetMipLevel(texel);
     uint pitch = info.mips[mip].pitch;
     uint height = info.mips[mip].height;
@@ -445,8 +453,8 @@ void main() {
 #endif
 
     if (IS_TILER != 0) {
-        tiled_data[tiled_offset / BYTES_PER_PIXEL] = linear_data[gl_GlobalInvocationID.x];
+        tiled_data[tiled_offset / BYTES_PER_PIXEL] = linear_data[global];
     } else {
-        linear_data[gl_GlobalInvocationID.x] = tiled_data[tiled_offset / BYTES_PER_PIXEL];
+        linear_data[global] = tiled_data[tiled_offset / BYTES_PER_PIXEL];
     }
 }

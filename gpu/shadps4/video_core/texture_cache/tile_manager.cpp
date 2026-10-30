@@ -26,6 +26,8 @@
 #include <magic_enum/magic_enum.hpp>
 #include <vk_mem_alloc.h>
 
+#include <algorithm>
+
 namespace VideoCore {
 
 struct TilingInfo {
@@ -38,6 +40,13 @@ struct TilingInfo {
 TileManager::TileManager(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                          Vulkan::Runtime& runtime_, StreamBuffer& stream_buffer_)
     : instance{instance_}, scheduler{scheduler_}, runtime{runtime_}, stream_buffer{stream_buffer_} {
+    // Legal chunk size on this device: never exceed the spec guarantee, the device
+    // limit, or the kMaxTilingGroupsX the unit test pins.
+    const u32 device_max =
+        instance.GetPhysicalDevice().getProperties().limits.maxComputeWorkGroupCount[0];
+    if (device_max != 0) {
+        max_tiling_groups_x = std::min(device_max, kMaxTilingGroupsX);
+    }
     const auto device = instance.GetDevice();
     const std::array<vk::DescriptorSetLayoutBinding, 3> bindings = {{
         {
@@ -72,11 +81,17 @@ TileManager::TileManager(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     desc_layout = std::move(desc_layout_result.value);
 
     const vk::DescriptorSetLayout set_layout = *desc_layout;
+    // Base-texel offset for multi-dispatch tiling (tiling.comp push block).
+    const vk::PushConstantRange push_range{
+        .stageFlags = vk::ShaderStageFlagBits::eCompute,
+        .offset = 0,
+        .size = sizeof(u32),
+    };
     const vk::PipelineLayoutCreateInfo layout_info = {
         .setLayoutCount = 1U,
         .pSetLayouts = &set_layout,
-        .pushConstantRangeCount = 0U,
-        .pPushConstantRanges = nullptr,
+        .pushConstantRangeCount = 1U,
+        .pPushConstantRanges = &push_range,
     };
     auto [layout_result, layout] = device.createPipelineLayoutUnique(layout_info);
     ASSERT_MSG(layout_result == vk::Result::eSuccess, "Failed to create pipeline layout: {}",
@@ -196,8 +211,11 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
 void TileManager::RecordTilingDispatch(vk::Pipeline pipeline, const vk::DescriptorBufferInfo& tiled,
                                        const vk::DescriptorBufferInfo& linear,
                                        const vk::DescriptorBufferInfo& params, u32 dim_x) {
+    // Split group counts above the device/spec limit into several legal dispatches;
+    // every texel is still processed exactly once via the base-texel push constant.
+    const auto chunks = SplitTilingDispatch(dim_x, max_tiling_groups_x);
     scheduler.RecordCrumb({.name = "tiling"}, [pipeline, layout = *pl_layout, tiled, linear,
-                                              params, dim_x](vk::CommandBuffer cmdbuf) {
+                                              params, chunks](vk::CommandBuffer cmdbuf) {
         cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
         const std::array<vk::WriteDescriptorSet, 3> set_writes = {{
             {
@@ -220,7 +238,11 @@ void TileManager::RecordTilingDispatch(vk::Pipeline pipeline, const vk::Descript
             },
         }};
         cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, set_writes);
-        cmdbuf.dispatch(dim_x, 1, 1);
+        for (const auto& chunk : chunks) {
+            cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0,
+                                 sizeof(chunk.base_texel), &chunk.base_texel);
+            cmdbuf.dispatch(chunk.group_count, 1, 1);
+        }
     });
 }
 
