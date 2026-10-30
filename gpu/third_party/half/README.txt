@@ -13,7 +13,7 @@ INSTALLATION AND REQUIREMENTS
 
 Comfortably enough, the library consists of just a single header file 
 containing all the functionality, which can be directly included by your 
-projects, without the neccessity to build anything or link to anything.
+projects, without the necessity to build anything or link to anything.
 
 Whereas this library is fully C++98-compatible, it can profit from certain 
 C++11 features. Support for those features is checked automatically at compile 
@@ -63,7 +63,7 @@ DOCUMENTATION
 -------------
 
 Here follow some general words about the usage of the library and its 
-implementation. For a complete documentation of its iterface look at the 
+implementation. For a complete documentation of its interface look at the 
 corresponding website http://half.sourceforge.net. You may also generate the 
 complete developer documentation from the library's only include file's doxygen 
 comments, but this is more relevant to developers rather than mere users (for 

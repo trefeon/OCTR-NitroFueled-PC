@@ -32,7 +32,7 @@ The library in its most recent version can be obtained from here, see the [Relea
 
 If you are interested in previous versions of the library, see the [SourceForge download page](http://sourceforge.net/projects/half/files/half).
 
-Comfortably enough, the library consists of just a single header file containing all the functionality, which can be directly included by your projects, without the neccessity to build anything or link to anything.
+Comfortably enough, the library consists of just a single header file containing all the functionality, which can be directly included by your projects, without the necessity to build anything or link to anything.
 
 Whereas this library is fully C++98-compatible, it can profit from certain C++11 features. Support for those features is checked and enabled automatically at compile (or rather preprocessing) time, but can be explicitly enabled or disabled by defining the corresponding preprocessor symbols to either 1 or 0 yourself. This is useful when the automatic detection fails (for more exotic implementations) or when a feature should be explicitly disabled:
 
@@ -55,7 +55,7 @@ The library has been tested successfully with *Visual C++ 2005* - *2015*, *gcc 4
 Documentation												{#doc}
 =============
 
-What follows are some general words about the usage of the library and its implementation. For a complete reference documentation of its iterface you should consult the [API Documentation](usergroup0.html).
+What follows are some general words about the usage of the library and its implementation. For a complete reference documentation of its interface you should consult the [API Documentation](usergroup0.html).
 
 
 Basic usage													{#usage}
