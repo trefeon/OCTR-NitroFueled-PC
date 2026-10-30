@@ -65,8 +65,11 @@ def prune_sessions(sessions, keep=KEEP_SESSIONS):
 def finish(code):
     if ACTIVE is None:return
     session,state=ACTIVE
+    if code==0:
+        sync_saves(session/'user/savedata',state/'user/savedata',state/'save-backups')
+        title_id=json.loads((session/'launch.json').read_text())['title_id']
+        sync_saves(session/'user/trophies'/title_id,state/'user/trophies'/title_id,state/'trophy-backups')
     save_json(session/'result.json',{'exit_code':code})
-    if code==0:sync_saves(session/'user/savedata',state/'user/savedata',state/'save-backups')
 
 def prepare(port,data,environment,game,config,prepare_only=False,log=print):
     global ACTIVE
@@ -139,7 +142,7 @@ def prepare(port,data,environment,game,config,prepare_only=False,log=print):
             ensure_shaders(port,state,game,user,plan,environment,lambda stage,message:print(message,flush=True))
             for op,folder in plan['operations']:
                 if op['kind'].startswith('shader_'):apply_shader(under(user,op['target']),op,folder)
-        save_json(session/'launch.json',{'packages':names,'variants':plan['variants'],'writes':writes,
+        save_json(session/'launch.json',{'title_id':title_id,'packages':names,'variants':plan['variants'],'writes':writes,
             'resolution':plan['selection_settings'].get('output_res'),'online':plan['settings'].get('online','0')})
         environment.update(plan['environment'])
         environment.update(BB_CONFIG=str(ini),BB_USER_DIR=str(user),BB_PATCHES_DIR=str(plan['profile']/'patches'),BB_PATCHES_CONFIG=str(snapshot),BB_MODS_ENABLED='0',BB_CLEAR_SHADER_CACHE='0',BB_MOD_ARCHIVE_PLAN=str(plan['archive_plan']),BB_MOD_FILE_MAP=str(plan['file_map']),BB_MOD_FILE_DIRS=str(plan['file_dirs']),BB_MOD_SOURCE_GAME=str(game))

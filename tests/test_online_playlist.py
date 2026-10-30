@@ -6,7 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 import archive_patch
+import gcn_shaders
 import igz_file
+import online_mode
 
 
 class PackedOffsetTests(unittest.TestCase):
@@ -45,6 +47,48 @@ def iga(entries):
 
 
 class ArchivePatchTests(unittest.TestCase):
+    def test_widescreen_entry_composes_with_online_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pak = Path(tmp) / 'update2.pak'
+            pak.write_bytes(iga([('selector.igz', b'ORIGINAL'), ('other.igz', b'OTHER')]))
+            entries = gcn_shaders.pak_entries(pak)
+            guest = '/app0/archives/update2.pak'
+            base = Path(tmp) / 'widescreen.bbpatch'
+            archive_patch.write_entries_patch(base, pak, guest, {0: b'WIDESCREEN'})
+
+            current = online_mode.current_entry(pak, entries, 0, base)
+            self.assertEqual(current, b'WIDESCREEN')
+            final = Path(tmp) / 'online.bbpatch'
+            archive_patch.write_entries_patch(final, pak, guest, {0: current + b'+ONLINE OPTIONS'},
+                                              base, override={0})
+
+            _size, _guest, ranges = archive_patch.read(final)
+            record_at = 0x38 + 4 * len(entries) + 16 * 0
+            self.assertEqual(sum(offset == record_at for offset, _ in ranges), 1)
+            result = archive_patch.view(pak, final, 0, 1 << 20)
+            view_pak = Path(tmp) / 'view.pak'
+            view_pak.write_bytes(result)
+            patched_entries = gcn_shaders.pak_entries(view_pak)
+            with view_pak.open('rb') as f:
+                actual = gcn_shaders.read_entry(f, *patched_entries[0][1:])
+            self.assertEqual(actual, b'WIDESCREEN+ONLINE OPTIONS')
+            self.assertEqual(online_mode.current_entry(pak, entries, 1, base), b'OTHER')
+
+    def test_override_must_only_drop_matching_base_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pak = Path(tmp) / 'update2.pak'
+            pak.write_bytes(iga([('a.igz', b'a'), ('b.igz', b'b')]))
+            guest = '/app0/archives/update2.pak'
+            base = Path(tmp) / 'base.bbpatch'
+            archive_patch.write_entries_patch(base, pak, guest, {0: b'A', 1: b'B'})
+            out = Path(tmp) / 'out.bbpatch'
+            with self.assertRaisesRegex(ValueError, 'already replaced'):
+                archive_patch.write_entries_patch(out, pak, guest, {0: b'A2', 1: b'B2'}, base,
+                                                  override={0})
+            with self.assertRaisesRegex(ValueError, 'included in entries'):
+                archive_patch.write_entries_patch(out, pak, guest, {0: b'A2'}, base,
+                                                  override={1})
+
     def test_entry_patch_is_read_as_the_new_entry(self):
         import gcn_shaders as reader
         with tempfile.TemporaryDirectory() as tmp:

@@ -17,6 +17,7 @@ from patches import load_segments
 ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_modeselect.igz'
 LABEL_ENTRY = 'temporary/octane/data/ps4/output/ui/octane_lobby_modeselect_en.lng'
 GRAPH_SHA256 = '56d613eaa1234151a3d720af694b460480c4cbc766508cb60c324c91ca8eae47'
+GRAPH_WIDESCREEN_SHA256 = 'a23cd1ef8903e50161c2d667e59f85a51fdccecdd913a21d54461f5e693966e3'
 # Native selector's selected-index event adapter, including its RIP-relative LEA.
 HOOK_PATTERN = re.compile(bytes.fromhex(
     '55 48 89 e5 41 57 41 56 53 50 48 8d 05 97 a1 87 01'), re.DOTALL)
@@ -31,7 +32,7 @@ def hook_site(elf):
 
 
 def rebuild(blob):
-    if hashlib.sha256(blob).hexdigest() != GRAPH_SHA256:
+    if hashlib.sha256(blob).hexdigest() not in (GRAPH_SHA256, GRAPH_WIDESCREEN_SHA256):
         raise ValueError('native Online mode selector is not the supported USA 1.21 asset')
     g = Igz(blob)
     # The native selector consumes the same option/availability lists as other selectors.
@@ -53,6 +54,21 @@ def rebuild(blob):
     return g.build()
 
 
+def current_entry(pak, entries, index, base):
+    """Return the entry bytes currently visible to the game, including a base patch replacement."""
+    if base is not None:
+        _size, _guest, ranges = archive_patch.read(base)
+        count = len(entries)
+        record_at = 0x38 + 4 * count + 16 * index
+        record = next((data for offset, data in ranges if offset == record_at), None)
+        if record is not None:
+            offset_lo, hi_extra, length, _mode = struct.unpack('<4I', record)
+            position = offset_lo | ((hi_extra & 0xFF) << 32)
+            return archive_patch.view(pak, base, position, length)
+    with pak.open('rb') as f:
+        return iga.read_entry(f, *entries[index][1:])
+
+
 def prepare(game, out, elf, bases):
     site = hook_site(Path(elf).read_bytes())
     pak = resolve(Path(game) / 'archives/update2.pak')
@@ -60,14 +76,14 @@ def prepare(game, out, elf, bases):
     index = next((i for i, e in enumerate(entries) if e[0].lower() == ENTRY), None)
     if index is None:
         raise ValueError('native Online menu graph is missing')
-    with pak.open('rb') as f:
-        payload = rebuild(iga.read_entry(f, *entries[index][1:]))
+    patches = {archive_patch.read(p)[1]: Path(p) for p in bases}
+    base = patches.get('/app0/archives/update2.pak')
+    payload = rebuild(current_entry(pak, entries, index, base))
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     guest = '/app0/archives/update2.pak'
-    patches = {archive_patch.read(p)[1]: Path(p) for p in bases}
     target = out / 'online-mode.bbpatch'
-    archive_patch.write_entries_patch(target, pak, guest, {index: payload}, patches.get(guest))
+    archive_patch.write_entries_patch(target, pak, guest, {index: payload}, base, override={index})
     patches[guest] = target
     label_pak = resolve(Path(game) / 'archives/update.pak')
     label_entries = iga.pak_entries(label_pak)

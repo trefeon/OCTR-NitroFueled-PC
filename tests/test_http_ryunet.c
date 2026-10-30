@@ -36,6 +36,7 @@ static char last_line[256], last_host[128];
 static long long last_ts;
 static int intercept; /* 1: requests for the server's name; 2: also for its address; 3: all */
 static int requests;
+static volatile int accepted;
 
 /* What src/runtime_net.c and runtime_net_overrides.c give runtime_http.c. */
 int runtime_net_is_online(void) { return 1; }
@@ -48,16 +49,23 @@ void runtime_net_trace(const char *fmt, ...) {
     putchar('\n');
 }
 const char *net_overrides_lookup(const char *host, uint16_t *port_override, int *is_http) {
-    if (strcmp(host, "lavender-ps4-auth3.prod.demonware.net") != 0) return NULL;
+    if (strcmp(host, "lavender-ps4-auth3.prod.demonware.net") != 0 &&
+        strcmp(host, "pipes-prod-glutton.public.aws.demonware.net") != 0 &&
+        strcmp(host, "objectstore.prod.demonware.net") != 0) return NULL;
     *port_override = server_port;
     *is_http = 1;
     return "localhost";
+}
+int net_overrides_is_allowed(const char *host) {
+    return strcmp(host, "pipes-prod-glutton.public.aws.demonware.net") != 0 &&
+           strcmp(host, "objectstore.prod.demonware.net") != 0;
 }
 
 /* One request: its line, Host and signature time; the answer as nick_proof.go would give it. */
 static void serve_one(void) {
     SOCKET s = accept(listener, NULL, NULL);
     if (s == INVALID_SOCKET) return;
+    __atomic_add_fetch(&accepted, 1, __ATOMIC_RELAXED);
     char request[8192];
     int got = 0;
     for (int n; got < (int)sizeof request - 1 && (n = recv(s, request + got, (int)sizeof request - 1 - got, 0)) > 0;) {
@@ -125,6 +133,26 @@ static int login(void) {
     return status;
 }
 
+static void check_blocked_host(const char *host) {
+    char url[256];
+    snprintf(url, sizeof url, "https://%s:443/upload", host);
+    const int32_t tmpl = runtime_http_create_template(1, "SCE-PS4", 1, 1);
+    const int32_t conn = runtime_http_create_connection(tmpl, url, 1);
+    const int32_t req = runtime_http_create_request2(conn, "POST", url, 7);
+    CHECK(conn > 0 && req > 0);
+    const int before = __atomic_load_n(&accepted, __ATOMIC_RELAXED);
+    CHECK(runtime_http_send_request(req, "secret!", 7) == (int32_t)0x80431063);
+#ifdef _WIN32
+    Sleep(50);
+#else
+    struct timespec pause = {0, 50000000};
+    nanosleep(&pause, NULL);
+#endif
+    CHECK(__atomic_load_n(&accepted, __ATOMIC_RELAXED) == before);
+    runtime_http_delete_request(req);
+    runtime_http_delete_connection(conn);
+}
+
 int main(void) {
 #ifdef _WIN32
     WSADATA wsa;
@@ -150,6 +178,8 @@ int main(void) {
     pthread_create(&thread, NULL, server_thread, NULL);
 #endif
     runtime_http_init();
+    check_blocked_host("pipes-prod-glutton.public.aws.demonware.net");
+    check_blocked_host("objectstore.prod.demonware.net");
 
     char host[64], address[64], port[16];
     snprintf(host, sizeof host, "localhost:%u", server_port);

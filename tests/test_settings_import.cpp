@@ -1,12 +1,14 @@
-// Tests of bringing the settings from another installation (launcher/windows/settings_import.cpp):
-// the list of installations, finding an older release unpacked next to the new one, and what is
-// copied. Build: ninja -C out/gpu-win settings-import-test; run out/gpu-win/settings-import-test.exe.
+// Windows launcher settings import plus binding serialization and DLC path resolution. Build:
+// ninja -C out/gpu-win settings-import-test; run out/gpu-win/settings-import-test.exe.
 #include "settings_import.h"
+#include "launcher_bindings.h"
+#include "launcher_paths.h"
 
 #include <windows.h>
 
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -94,11 +96,33 @@ int main() {
     // The new one is a used installation now, and the old one stays as it was.
     CHECK(IsUsedInstall(fresh) && Read(old_install / L"dlc" / L"pack" / L"file") == "dlc");
 
+    CHECK(LauncherBindings::AppendPadBinding("a", "b") == "a,b");
+    CHECK(LauncherBindings::AppendPadBinding("a,b", "a") == "a,b");
+    CHECK(LauncherBindings::AppendPadBinding("a, b, a", "c") == "a,b,c");
+    CHECK(LauncherBindings::AppendPadBinding("a,b,c,d", "e") == "a,b,c,d");
+    CHECK(LauncherBindings::CaptureKeyboardBinding("default", "x", true) == "x");
+    CHECK(LauncherBindings::CaptureKeyboardBinding("a,b", "c", false) == "a,b,c");
+    CHECK(LauncherBindings::CaptureKeyboardBinding("a,b", "b", false) == "a,b");
+    CHECK(LauncherBindings::CaptureKeyboardBinding("a,b,c,d", "e", false) == "b,c,d,e");
+
+    const fs::path launcher_root = (fs::current_path() / L"launcher-root").lexically_normal();
+    CHECK(LauncherPaths::ResolveDlcDirectory(launcher_root, fs::path{}) == (launcher_root / L"dlc").lexically_normal());
+    CHECK(LauncherPaths::ResolveDlcDirectory(launcher_root, fs::path(L"../shared/dlc")) ==
+          (launcher_root.parent_path() / L"shared" / L"dlc").lexically_normal());
+    const fs::path absolute_dlc = (launcher_root / L"other" / L".." / L"dlc").lexically_normal();
+    CHECK(LauncherPaths::ResolveDlcDirectory(launcher_root, absolute_dlc) == absolute_dlc);
+    CHECK(LauncherPaths::AbsoluteNormalizedDlcDirectory(launcher_root, fs::path(L"custom/../dlc")) ==
+          (launcher_root / L"dlc").lexically_normal());
+    CHECK(LauncherPaths::PersistedDlcDirectory(launcher_root, fs::path{}).empty());
+    CHECK(LauncherPaths::PersistedDlcDirectory(launcher_root, fs::path(L"custom/../dlc")) ==
+          (launcher_root / L"dlc").lexically_normal());
+    CHECK(LauncherPaths::PersistedDlcDirectory(launcher_root, absolute_dlc) == absolute_dlc);
+
     fs::remove_all(base);
     if (failures) {
         std::fprintf(stderr, "%d failures\n", failures);
         return 1;
     }
-    std::puts("PASS: installations listed and found next to a new one, settings and saves copied");
+    std::puts("PASS: launcher settings import, bindings and DLC path resolution");
     return 0;
 }

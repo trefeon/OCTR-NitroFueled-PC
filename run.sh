@@ -18,6 +18,11 @@ fi
 data=${BB_DATA_DIR:-.}
 out=$data/out
 mkdir -p "$out"
+rm -rf -- "$data/perf"
+for stale_state in "$out"/perf-state.*; do
+    [[ -f $stale_state || -L $stale_state ]] || continue
+    rm -f -- "$stale_state"
+done
 export BB_CONFIG=${BB_CONFIG:-$data/bbport.ini}
 if [[ -z ${BB_PREBUILT:-} && -z ${BB_IN_NIX_SHELL:-} ]] && ! { command -v pkg-config >/dev/null && pkg-config --exists vulkan sdl3; } && command -v nix-shell >/dev/null; then
     args=''; if (( $# )); then args=$(printf '%q ' "$@"); fi
@@ -79,6 +84,8 @@ else
     probe=${BB_PROBE:-out/sacredfire}  # BB_PROBE: a wrapper (gdb) around it
     version=$(cat out/VERSION 2>/dev/null || true)
 fi
+source scripts/isa_rewrite_preflight.sh
+isa_rewrite_preflight_check "$probe"
 # Mod packages (the launcher's Mods page: .pak, .zip and folders in the data folder's mods/,
 # switched in patches.json), as run.py: scripts/mod_packages.py prepares a separate mod session
 # (its own bbport.ini, saves and patches, the mods' files redirected by the engine, never a game
@@ -128,6 +135,7 @@ fi
 "$PYTHON" scripts/prepare.py "$game" --out "$out"
 "$PYTHON" scripts/link_libc.py "$game" --out "$out"
 "$PYTHON" scripts/link_modules.py "$game" --out "$out" --modules libc.prx libSceFios2.prx libSceNpToolkit2.prx
+isa_rewrite_preflight_generate "$PYTHON" "$out/boot-linked.bin" "$out"
 # SacredFire: symbol names for this eboot's host-side imports (shadPS4's aerolib list, fetched once).
 "$PYTHON" tools/gen_import_names.py --out "$out"
 # Optional DLC from the writable data directory (also used by the launcher).
@@ -368,7 +376,7 @@ fi
 # cache clearing above would miss (seen on the first launch from a fresh data directory).
 export BB_GPU_USER_DIR=${BB_USER_DIR:-$data/user}
 mkdir -p "$BB_GPU_USER_DIR"
-probe_args=("$out/boot-linked.bin" --import-names "$out/import_names.txt" --content-profile "$out/content.bin" "${patch_args[@]}" --app0 "$game" --user "${BB_USER_DIR:-$data/user}" --timeout "${BB_TIMEOUT:-0}" "$@")
+probe_args=("$out/boot-linked.bin" --import-names "$out/import_names.txt" --content-profile "$out/content.bin" "${patch_args[@]}" "${ISA_REWRITE_ARGS[@]}" --app0 "$game" --user "${BB_USER_DIR:-$data/user}" --timeout "${BB_TIMEOUT:-0}" "$@")
 if [[ -n ${mod_game:-} || $mod_session_owner == 1 ]]; then
     "$probe" "${probe_args[@]}" &
     mod_pid=$!
@@ -383,16 +391,5 @@ if [[ -n ${mod_game:-} || $mod_session_owner == 1 ]]; then
     fi
     exit "$mod_status"
 fi
-# The game's output reaches the launcher through scripts/perf_report.py (each line passed on as it
-# comes), which keeps the anonymous performance report's data; the report is made when the game
-# ends (and sent only with bbport.ini perf_reports=1, asked once by the launcher). BB_PERF_LOG=0:
-# the game is started as before.
-if [[ ${BB_PERF_LOG:-1} == 0 ]]; then exec "$probe" "${probe_args[@]}"; fi
-perf_state=$(mktemp "$out/perf-state.XXXXXX")
-set +e
-"$probe" "${probe_args[@]}" 2>&1 | "$PYTHON" -u scripts/perf_report.py --tee "$perf_state"
-status=${PIPESTATUS[0]}
-set -e
-"$PYTHON" scripts/perf_report.py --finish "$perf_state" --code "$status" --config "$BB_CONFIG" \
-    --data "$data" --octr "${version:-}" --edition "$title_id" || true
-exit "$status"
+# Start directly so the game's stdout, stderr and exit status reach the launcher unchanged.
+exec "$probe" "${probe_args[@]}"

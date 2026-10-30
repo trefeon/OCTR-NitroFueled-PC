@@ -56,11 +56,16 @@ def write_entry_patch(target, archive, guest, index, payload):
     write_entries_patch(target, archive, guest, {index: payload})
 
 
-def write_entries_patch(target, archive, guest, entries, base=None):
+def write_entries_patch(target, archive, guest, entries, base=None, override=()):
     """A patch that replaces entries {index: payload} of an IGA v13 archive, each stored
     uncompressed after the end of the archive (on sector boundaries). base, another patch for the
     same archive (path), is kept in it: its ranges first, these entries after its data. The
-    runtime takes one patch per archive, so two features changing one archive share a file."""
+    runtime takes one patch per archive, so two features changing one archive share a file.
+    override names entries among them that base may already replace; that old record is removed
+    because its effective bytes are already included in the new payload."""
+    override = set(override)
+    if not override <= entries.keys():
+        raise ValueError('override entries must be included in entries')
     archive = resolve(archive)
     size = Path(archive).stat().st_size
     ranges, end = [], size
@@ -78,6 +83,10 @@ def write_entries_patch(target, archive, guest, entries, base=None):
                 raise ValueError('no such entry')
             f.seek(0x38 + 4 * count + 16 * index)
             records[index] = struct.unpack('<4I', f.read(16))
+    if override:
+        dropped = {0x38 + 4 * count + 16 * index for index in override}
+        ranges = [(offset, data) for offset, data in ranges
+                  if not (offset in dropped and len(data) == 16)]
     taken = {o for o, d in ranges if len(d) == 16}
     for index in sorted(entries):
         record_at = 0x38 + 4 * count + 16 * index

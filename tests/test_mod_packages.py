@@ -205,6 +205,27 @@ class PackageTests(unittest.TestCase):
         p=self.package()
         with zipfile.ZipFile(p,'a') as z:z.writestr('../escape.txt',b'bad')
         self.assertFalse(self.scan()['entries']);self.assertFalse((self.port/'escape.txt').exists())
+    def test_trophy_sync_failure_keeps_session_unmarked_and_retained(self):
+        session=self.root/'mod-state/sessions/failed-sync'
+        state=self.root/'mod-state'
+        (session/'user/savedata').mkdir(parents=True)
+        (session/'user/savedata/save.bin').write_bytes(b'save')
+        (session/'user/trophies/CUSA13795').mkdir(parents=True)
+        (session/'user/trophies/CUSA13795/trophy.bin').write_bytes(b'trophy')
+        save_json(session/'launch.json',{'title_id':'CUSA13795'})
+        adapter.ACTIVE=(session,state)
+        sync_calls=[]
+        def sync(source,target,backups):
+            sync_calls.append(Path(target))
+            if len(sync_calls)==2:raise OSError('synthetic trophy sync failure')
+        with patch.object(adapter,'sync_saves',side_effect=sync):
+            with self.assertRaisesRegex(OSError,'trophy sync failure'):adapter.finish(0)
+        self.assertEqual(len(sync_calls),2)
+        result=session/'result.json'
+        self.assertFalse(result.exists())
+        self.assertEqual(adapter.prune_sessions(session.parent,keep=0),[])
+        self.assertTrue(session.is_dir())
+
     def test_old_finished_sessions_are_pruned(self):
         sessions=self.root/'mod-state/sessions'
         results={'a':0,'b':0,'c':0,'d':0,'e':139,'f':None}  # oldest first; e crashed, f unfinished
@@ -293,6 +314,36 @@ class PackageTests(unittest.TestCase):
         adapter.finish(1);self.assertFalse((state/'user/savedata/progress').exists())
         adapter.finish(0);self.assertEqual((state/'user/savedata/progress').read_bytes(),b'progress')
         self.assertFalse((self.port/'user').exists())
+    def test_trophies_commit_to_private_profile_only_after_success(self):
+        self.package();self.enable('sample')
+        vanilla=self.port/'user/trophies/CUSA13795';vanilla.mkdir(parents=True)
+        (vanilla/'unlocked.txt').write_text('vanilla unlocks')
+        self.prepare();session,state=adapter.ACTIVE
+        trophies=session/'user/trophies/CUSA13795';trophies.mkdir(parents=True,exist_ok=True)
+        (trophies/'unlocked.txt').write_text('mod unlocks')
+        (trophies/'trophies.tsv').write_text('mod trophy data')
+        adapter.finish(0)
+        profile=state/'user/trophies/CUSA13795'
+        self.assertEqual((profile/'unlocked.txt').read_text(),'mod unlocks')
+        self.assertEqual((profile/'trophies.tsv').read_text(),'mod trophy data')
+        self.assertEqual((vanilla/'unlocked.txt').read_text(),'vanilla unlocks')
+        self.assertFalse((vanilla/'trophies.tsv').exists())
+
+    def test_failed_mod_session_does_not_commit_trophies(self):
+        self.package();self.enable('sample')
+        vanilla=self.port/'user/trophies/CUSA13795';vanilla.mkdir(parents=True)
+        (vanilla/'unlocked.txt').write_text('vanilla unlocks')
+        self.prepare();session,state=adapter.ACTIVE
+        trophies=session/'user/trophies/CUSA13795';trophies.mkdir(parents=True,exist_ok=True)
+        (trophies/'unlocked.txt').write_text('mod unlocks')
+        (trophies/'trophies.tsv').write_text('mod trophy data')
+        adapter.finish(1)
+        profile=state/'user/trophies/CUSA13795'
+        self.assertEqual((profile/'unlocked.txt').read_text(),'vanilla unlocks')
+        self.assertFalse((profile/'trophies.tsv').exists())
+        self.assertEqual((vanilla/'unlocked.txt').read_text(),'vanilla unlocks')
+        self.assertFalse((vanilla/'trophies.tsv').exists())
+
     def test_compatible_resolution_preserved(self):
         m={'variantSettings':{'output_res':{'default':'5120x1440','allowed':['5120x1440','3840x1080']}}}
         settings,changes=choose([m],{'output_res':'3840x1080'})
