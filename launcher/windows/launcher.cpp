@@ -44,6 +44,10 @@
 #include <thread>
 #include <vector>
 
+// Tier mapping for "Recommended for your hardware" (own header, no Windows deps so the
+// focused test builds it on any host); kept here, away from the project includes below.
+#include "hw_recommend.h"
+
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
@@ -748,6 +752,7 @@ struct App {
 
     // Monitors and controllers (bb-gpu-capabilities).
     std::vector<std::pair<std::string, std::string>> displays;  // value (number), label
+    std::vector<int> display_hz;  // panel Hz per displays[i] via EnumDisplaySettings, 60 when unknown
     std::vector<std::pair<std::string, std::string>> gamepads;  // GUID, name
     std::thread probe;
     std::atomic<bool> probe_done{false};
@@ -2211,6 +2216,81 @@ void PollJobs() {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Hardware-matched recommended settings (Settings tab): GPU name + dedicated VRAM from the
+// existing DXGI adapter (no new probe process), panel Hz via EnumDisplaySettings.
+
+struct DxgiAdapterInfo {
+    bool ok = false;
+    std::string name;
+    std::uint64_t vram_bytes = 0;
+};
+
+const DxgiAdapterInfo& DxgiAdapter() {
+    static DxgiAdapterInfo info;
+    static bool done = false;
+    if (!done && g_device) {
+        done = true;  // the adapter never changes under a running launcher
+        IDXGIDevice* device = nullptr;
+        if (g_device->QueryInterface(__uuidof(IDXGIDevice), (void**)&device) == S_OK) {
+            IDXGIAdapter* adapter = nullptr;
+            if (device->GetAdapter(&adapter) == S_OK) {
+                DXGI_ADAPTER_DESC desc{};
+                if (adapter->GetDesc(&desc) == S_OK && desc.DedicatedVideoMemory > 0) {
+                    info.ok = true;
+                    info.name = Narrow(desc.Description);
+                    info.vram_bytes = desc.DedicatedVideoMemory;
+                }
+                adapter->Release();
+            }
+            device->Release();
+        }
+    }
+    return info;
+}
+
+bool DlssBridgePresent() {
+    const App& a = g_app;
+    std::error_code ec;
+    return fs::is_regular_file(a.root / L"bin" / L"sacredfire_dlss.dll", ec) &&
+           fs::is_regular_file(a.root / L"bin" / L"nvngx_dlss.dll", ec);
+}
+
+// Panel Hz of one display (0-based in EnumDisplayDevices order; -1 or out of range: the
+// primary display). The bb-gpu-capabilities list is in SDL order, which may differ from
+// Windows' order, so a numbered display is an approximation; unknown reads as 60.
+int PanelHzForDisplayIndex(int index) {
+    std::vector<std::wstring> names;
+    for (DWORD i = 0;; ++i) {
+        DISPLAY_DEVICEW dd{};
+        dd.cb = sizeof dd;
+        if (!EnumDisplayDevicesW(nullptr, i, &dd, 0)) break;
+        if (dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)
+            names.emplace_back(dd.DeviceName);
+    }
+    DEVMODEW dm{};
+    dm.dmSize = sizeof dm;
+    const wchar_t* target = nullptr;
+    std::wstring picked;
+    if (index >= 0 && size_t(index) < names.size()) {
+        picked = names[size_t(index)];
+        target = picked.c_str();
+    }
+    if (!EnumDisplaySettingsW(target, ENUM_CURRENT_SETTINGS, &dm)) return 60;
+    return dm.dmDisplayFrequency < 2 ? 60 : int(dm.dmDisplayFrequency);
+}
+
+// Panel Hz of the launcher's Monitor setting ("": primary); 60 when unknown.
+int SelectedPanelHz() {
+    int index = -1;
+    {
+        std::scoped_lock lock{g_app.mutex};
+        const int number = std::atoi(g_app.launcher.Get("display").c_str());
+        if (number > 0) index = number - 1;
+    }
+    return PanelHzForDisplayIndex(index);
+}
+
 void StartProbe() {
     App& a = g_app;
     if (a.probe.joinable()) a.probe.join();
@@ -2234,6 +2314,9 @@ void StartProbe() {
             if (t2 != std::string::npos && line.substr(t2 + 1) == "1") label += g_spanish ? " - principal" : " - primary";
             displays.emplace_back(std::to_string(number), label);
         }
+        std::vector<int> hz;
+        hz.reserve(displays.size());
+        for (size_t i = 0; i < displays.size(); ++i) hz.push_back(PanelHzForDisplayIndex(int(i)));
         const Captured p = RunCaptured(tool.wstring(), Quote(tool.wstring()) + L" --gamepads", app.bin, 10000);
         std::stringstream ps(p.output);
         while (std::getline(ps, line)) {
@@ -2243,6 +2326,7 @@ void StartProbe() {
         }
         std::scoped_lock lock{app.mutex};
         app.displays = std::move(displays);
+        app.display_hz = std::move(hz);
         app.gamepads = std::move(pads);
         app.probe_done = true;
     });
@@ -3481,10 +3565,68 @@ void WidescreenSettings() {
         "(otherwise the game starts at 16:9). No FSR or DLSS; the internal resolution picks the variant."));
 }
 
+void ApplyHwRecommended(const HwRecommend::Recommendation& rec) {
+    // Single code path: the same ini keys, through the same Set+Save setters, that the
+    // manual controls use (fps_limit/render_res/temporal/async_* in bbport.ini, present_mode
+    // in launcher.ini). The native renderer's combo only offers off/fsr1, so a DLSS pick is
+    // clamped to FSR 1 there instead of storing a key its engine ignores.
+    App& a = g_app;
+    a.game.Set("fps_limit", std::to_string(rec.fps_limit));
+    a.game.Set("render_res", rec.render_res);
+    const bool native = a.game.Get("renderer") == "native";
+    const bool dlss = std::string(rec.temporal) == "dlss" && !native;
+    a.game.Set("temporal", dlss ? "dlss" : "fsr1");
+    if (dlss) a.game.Set("dlss_quality", "auto");  // the internal resolution decides, as in Auto
+    a.game.Erase("fsr1");
+    a.game.Erase("fsr3");
+    a.game.Set("async_pipelines", "1");
+    a.game.Set("async_submit", "1");
+    SaveGameIni();
+    a.launcher.Set("present_mode", "Mailbox");
+    SaveLauncher();
+}
+
 void SettingsTab() {
     App& a = g_app;
     ImGui::TextColored(kGrey, "%s", T("Se aplican al pulsar Jugar. El menú del juego (Insert o L3+R3) cambia los mismos ajustes.",
                                       "Applied when you press Play. The in-game menu (Insert or L3+R3) changes the same settings."));
+
+    ImGui::SeparatorText(T("Recomendado para tu equipo", "Recommended for your hardware"));
+    {
+        const DxgiAdapterInfo& gpu = DxgiAdapter();
+        const int hz = SelectedPanelHz();
+        const bool dlss_files = DlssBridgePresent();
+        const bool rtx = gpu.ok && HwRecommend::IsRtxName(gpu.name);
+        const HwRecommend::Recommendation rec =
+            HwRecommend::RecommendForHardware(gpu.ok ? gpu.vram_bytes : 0, hz, rtx, dlss_files);
+        const std::string upscaler = std::string(rec.temporal) == "dlss" ? "DLSS" : "FSR 1";
+        if (gpu.ok) {
+            char detected[256];
+            std::snprintf(detected, sizeof detected,
+                          T("Detectado: %s, %s de VRAM, pantalla de %d Hz",
+                            "Detected: %s, %s VRAM, %d Hz display"),
+                          gpu.name.c_str(), FormatBytes(gpu.vram_bytes).c_str(), hz);
+            ImGui::TextWrapped("%s", detected);
+        } else {
+            ImGui::TextWrapped("%s", T("GPU no detectada: se usa el ajuste seguro (720p, FSR 1).",
+                                       "GPU not detected: using the safe fallback (720p, FSR 1)."));
+        }
+        char applies[256];
+        std::snprintf(applies, sizeof applies,
+                      T("Aplica: %sp, %s, %d FPS, Mailbox, async activado",
+                        "Applies: %sp, %s, %d FPS, Mailbox, async on"),
+                      rec.render_res, upscaler.c_str(), rec.fps_limit);
+        ImGui::TextColored(kGrey, "%s", applies);
+        if (ImGui::Button(T("Aplicar recomendado", "Apply recommended"))) {
+            ApplyHwRecommended(rec);
+            a.notice = T("Ajustes recomendados aplicados.", "Recommended settings applied.");
+        }
+        ImGui::TextColored(kGrey, "%s",
+                           T("El límite nunca pasa de 60 FPS aunque la pantalla dé más: el juego está hecho para 60 "
+                             "con el parche de 60 FPS; sin límite la lógica del juego se acelera.",
+                             "The cap never exceeds 60 FPS even on faster panels: the game was built for 60 with the "
+                             "60 FPS patch; uncapped, the game logic itself speeds up."));
+    }
 
     ImGui::SeparatorText(T("Rendimiento", "Performance"));
     {

@@ -432,6 +432,12 @@ target_compile_options(camera-motion-test PRIVATE -UNDEBUG -fPIC)
 target_link_libraries(camera-motion-test PRIVATE bbgpu)
 add_dependencies(camera-motion-test host_shaders)
 
+# Hardware-matched recommended settings: the launcher's pure tier mapping
+# (launcher/windows/hw_recommend.h); header-only, builds on any host.
+add_executable(hw-recommend-test EXCLUDE_FROM_ALL ../tests/test_hw_recommend.cpp)
+target_compile_options(hw-recommend-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(hw-recommend-test PRIVATE .. ../launcher/windows)
+
 # bbport: FSR 4 benchmark outside the game (tools/fsr4_bench.cpp): ninja -C out/gpu fsr4-bench.
 add_executable(upscaler-support-test EXCLUDE_FROM_ALL ../tests/test_upscaler_support.cpp
     shim/bbport_settings.cpp)
