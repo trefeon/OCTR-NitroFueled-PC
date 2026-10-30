@@ -4,7 +4,11 @@
  * BB_GAMEPAD). --displays: the monitors, "name<tab>WxH<tab>primary (1 or 0)" per line in SDL's
  * order (the launcher's monitor list, BB_DISPLAY; issue #69). --read-input: one key or button for the
  * launcher's controls (below). --device: "vendorID<tab>name" of the GPU the game takes (run.sh:
- * memory model and driver workarounds by vendor and chip). */
+ * memory model and driver workarounds by vendor and chip). --list-devices: one line per Vulkan
+ * device, "index<tab>vendorID<tab>name<tab>type<tab>vramMiB<tab>driver" (the launchers' GPU picker:
+ * index is the BB_GPU_ID for that run; type is discrete/integrated/virtual/cpu/other from
+ * VkPhysicalDeviceType; vram is the largest DEVICE_LOCAL heap in MiB; driver is driverVersion
+ * in hex). --list-devices never applies the auto-ranking or BB_GPU_ID; it lists in Vulkan order. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -203,6 +207,36 @@ static int read_input(const char *kind) {
     return 0;
 }
 
+/* --list-devices: one line per Vulkan device in enumeration order (the BB_GPU_ID index),
+ * "index<tab>vendorID<tab>name<tab>type<tab>vramMiB<tab>driver". The launchers' GPU picker
+ * reads it; neither the auto-ranking (better_device) nor BB_GPU_ID applies here. */
+static const char *device_type_name(VkPhysicalDeviceType type) {
+    switch (type) {
+    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+        return "discrete";
+    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+        return "integrated";
+    case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+        return "virtual";
+    case VK_PHYSICAL_DEVICE_TYPE_CPU:
+        return "cpu";
+    default:
+        return "other";
+    }
+}
+
+static int list_devices(VkPhysicalDevice *devices, uint32_t count) {
+    for (uint32_t i = 0; i < count; ++i) {
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(devices[i], &props);
+        printf("%u\t%#06x\t%s\t%s\t%llu\t%#x\n", i, props.vendorID, props.deviceName,
+               device_type_name(props.deviceType),
+               (unsigned long long)(largest_local_heap(devices[i]) >> 20), props.driverVersion);
+    }
+    fflush(stdout);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--read-input")) {
         return read_input(argc > 2 ? argv[2] : "any");
@@ -241,6 +275,12 @@ int main(int argc, char **argv) {
         free(devices);
         vkDestroyInstance(instance, NULL);
         return 1;
+    }
+    if (argc > 1 && !strcmp(argv[1], "--list-devices")) {
+        const int status = list_devices(devices, count);
+        free(devices);
+        vkDestroyInstance(instance, NULL);
+        return status;
     }
     /* Match vk_instance.cpp's default ranking or its explicit BB_GPU_ID index. */
     VkPhysicalDevice selected = devices[0];

@@ -156,6 +156,13 @@ VRAM and panel refresh, and one click applies the matched tier (resolution by VR
 Mailbox, async on). The FPS cap is `min(panel Hz, 60)`: the game tick itself tops out at 60 with the 60 FPS
 patch, so uncapped present only redraws duplicate frames.
 
+**GPU** (launcher: Settings > Display): on machines with several GPUs, `Auto (recommended)` lets
+the game pick its default (a discrete GPU when there is one); choosing a card stores it as
+`vendorID:name` and the launcher passes that run's Vulkan index as `BB_GPU_ID` (`bb-gpu-capabilities
+--list-devices` shows the index, vendor, name, type, VRAM and driver of every device). Integrated
+graphics stay experimental: keep the driver updated — a crash inside `igvk64.dll` was seen with
+Intel driver 31.0.101.1999.
+
 ### Which game dumps work
 
 The launcher needs the game as **folders of decrypted files** from **CUSA13795** (the USA

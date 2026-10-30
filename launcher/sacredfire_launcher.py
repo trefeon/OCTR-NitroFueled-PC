@@ -165,6 +165,8 @@ DEFAULTS = {
     # The monitor for the game ("": the primary; else its number, BB_DISPLAY), and the launcher
     # window while the game runs: hidden, and closed when the game ends normally.
     "display": "",
+    # The graphics card ("": Auto, the discrete GPU; else "vendorID:name", BB_GPU_ID at launch).
+    "gpu": "",
     "hide_on_play": False,
     "close_on_play": False,
     # The PS4 trophy key (32 hex digits, the one shadPS4 uses): the Achievements page decrypts
@@ -311,6 +313,8 @@ def resolve_dlc_dir(settings):
 
 def game_environment(s):
     """Environment for run.sh from the launcher settings."""
+    global _LAST_GPU_NOTE
+    _LAST_GPU_NOTE = ""
     env = dict(os.environ)
     env["BB_GAME_DIR"] = str(Path(s["game_dir"]).expanduser())
     if s["user_dir"]:
@@ -321,6 +325,11 @@ def game_environment(s):
     env["BB_PRESENT_MODE"] = s["present_mode"]
     if s.get("display"):
         env["BB_DISPLAY"] = s["display"]  # the monitor's number (gpu/shim/window.cpp)
+    gpu_value, _LAST_GPU_NOTE = resolve_gpu_env(s.get("gpu", ""))
+    if _LAST_GPU_NOTE:
+        print(_LAST_GPU_NOTE, file=sys.stderr)
+    if gpu_value:
+        env["BB_GPU_ID"] = gpu_value  # the stored "vendorID:name" as this run's Vulkan index
     if s.get("gamepad"):
         env["BB_GAMEPAD"] = s["gamepad"]
     env["BB_NEO"] = "1" if s.get("neo") else "0"
@@ -373,6 +382,73 @@ def connected_displays():
             label += " - " + tr("primary")
         found.append((number, label))
     return found
+
+
+_LAST_GPU_NOTE = ""  # the last resolve_gpu_index fallback, for the log view
+
+
+def parse_gpu_devices(output):
+    """Vulkan GPUs from bb-gpu-capabilities --list-devices output
+    (index, vendorID, name, type, vramMiB, driver per tab-separated line)."""
+    found = []
+    for line in output.splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) < 6:
+            continue
+        try:
+            index = int(parts[0])
+        except ValueError:
+            continue
+        vendor, name, kind, vram, driver = parts[1:6]
+        dozen = name.startswith("Microsoft Direct3D12")
+        label = f"{name} \u2014 {vram} MiB" + (" (compatibility)" if dozen else "")
+        found.append({"index": index, "identity": f"{vendor}:{name}", "label": label,
+                      "vendor": vendor, "name": name, "type": kind, "vram": vram,
+                      "driver": driver, "dozen": dozen})
+    return found
+
+
+def connected_gpus():
+    """Vulkan GPUs (bb-gpu-capabilities --list-devices) in Vulkan (BB_GPU_ID) order; [] if unknown."""
+    tool = PORT_DIR / ("bin" if PACKAGED else "out") / "bb-gpu-capabilities"
+    try:
+        run = subprocess.run([str(tool), "--list-devices"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return parse_gpu_devices(run.stdout)
+
+
+def gpu_entries(devices):
+    """Picker entries: CPU-type devices are not usable and are skipped; Dozen compatibility
+    (Microsoft Direct3D12) entries go last."""
+    entries = [d for d in devices if d["type"] != "cpu" and not d["dozen"]]
+    return entries + [d for d in devices if d["type"] != "cpu" and d["dozen"]]
+
+
+def resolve_gpu_index(identity, devices):
+    """This run's BB_GPU_ID index for a stored "vendorID:name" identity; None for Auto ("")
+    or when nothing stored matches."""
+    if not identity:
+        return None
+    for device in gpu_entries(devices):
+        if device["identity"] == identity:
+            return device["index"]
+    return None
+
+
+def gpu_needs_igp_warning(device):
+    """Intel (0x8086) or integrated GPUs: experimental, with a known igvk64.dll crash."""
+    return device["vendor"] == "0x8086" or device["type"] == "integrated"
+
+
+def resolve_gpu_env(identity):
+    """(BB_GPU_ID value or "", log line or "") for a stored GPU identity, probed fresh."""
+    if not identity:
+        return "", ""
+    index = resolve_gpu_index(identity, connected_gpus())
+    if index is None:
+        return "", f'SacredFire: GPU "{identity}" not found: using Auto (recommended)'
+    return str(index), ""
 
 
 # --- patches: every eboot patch for CUSA13795 01.21 in the bundled patches/ and the player's
@@ -1255,6 +1331,15 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.display_row = combo_row(tr("Monitor"), tr("The screen the game window and fullscreen go to"),
                                      display_choices, self.settings.get("display", ""))
         screen.add(self.display_row)
+        self.gpus = gpu_entries(connected_gpus())
+        gpu_choices = [(tr("Auto (recommended)"), "")] + [(g["label"], g["identity"]) for g in self.gpus]
+        if self.settings.get("gpu") and self.settings["gpu"] not in [g["identity"] for g in self.gpus]:
+            gpu_choices.append((tr("GPU {} (not connected)").format(self.settings["gpu"]), self.settings["gpu"]))
+        self.gpu_row = combo_row(tr("GPU"), tr("The graphics card the game uses (Auto prefers the discrete GPU)"),
+                                 gpu_choices, self.settings.get("gpu", ""))
+        self.gpu_row.connect("notify::selected", lambda *_: self.update_gpu_warning())
+        screen.add(self.gpu_row)
+        self.update_gpu_warning()
         self.present_row = combo_row(tr("Presentation"), None, PRESENT_MODES, self.settings["present_mode"])
         screen.add(self.present_row)
         self.render_res_row = combo_row(tr("Internal resolution"), tr("Also in the in-game menu"),
@@ -1488,6 +1573,16 @@ class LauncherWindow(Adw.ApplicationWindow):
     def update_upscaler(self):
         self.sharpness_row.set_visible(combo_value(self.upscaler_row) == "fsr3")
 
+    def update_gpu_warning(self):
+        """The subtitle under the GPU combo: a warning on Intel/integrated GPUs (experimental,
+        with a known igvk64.dll crash), the default hint otherwise."""
+        current = combo_value(self.gpu_row)
+        device = next((g for g in self.gpus if g["identity"] == current), None)
+        if device is not None and gpu_needs_igp_warning(device):
+            self.gpu_row.set_subtitle(tr("Integrated GPU: experimental — update drivers; a crash was seen in igvk64.dll with version 31.0.101.1999"))
+        else:
+            self.gpu_row.set_subtitle(tr("The graphics card the game uses (Auto prefers the discrete GPU)"))
+
     def game_dir(self):
         return Path(self.settings["game_dir"]).expanduser()
 
@@ -1584,6 +1679,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         s["discord_rpc"] = self.discord_rpc_row.get_active()
         s["discord_accept_requests"] = self.discord_accept_row.get_active()
         s["display"] = combo_value(self.display_row)
+        s["gpu"] = combo_value(self.gpu_row)
         s["hide_on_play"] = self.hide_on_play_row.get_active()
         s["close_on_play"] = self.close_on_play_row.get_active()
         save_settings(s)
@@ -3147,6 +3243,8 @@ class LauncherWindow(Adw.ApplicationWindow):
             return
         self.stream = Gio.DataInputStream.new(self.process.get_stdout_pipe())
         self.game_started = int(time.time())
+        if _LAST_GPU_NOTE:
+            self.append_log(_LAST_GPU_NOTE + "\n")
         self.party, self.party_asked = None, 0.0
         self.read_line()
         self.process.wait_async(None, self.on_exit)

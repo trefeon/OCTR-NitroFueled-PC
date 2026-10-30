@@ -769,6 +769,20 @@ struct App {
     // Monitors and controllers (bb-gpu-capabilities).
     std::vector<std::pair<std::string, std::string>> displays;  // value (number), label
     std::vector<std::pair<std::string, std::string>> gamepads;  // GUID, name
+    // Vulkan GPUs (--list-devices): the picker's entries. identity ("vendorID:name", as in
+    // launcher.ini's gpu) is stable across runs; index is this probe's BB_GPU_ID.
+    struct GpuDevice {
+        int index = -1;
+        std::string vendor;    // %#06x, e.g. 0x10de
+        std::string name;      // as Vulkan reports it
+        std::string type;      // discrete/integrated/virtual/cpu/other
+        std::string vram;      // MiB, as printed
+        std::string driver;    // driverVersion hex
+        std::string identity;  // vendor + ":" + name
+        std::string label;     // "name — vram MiB" (+ " (compatibility)" for Dozen)
+        bool dozen = false;    // Microsoft Direct3D12 (*) entry: listed last
+    };
+    std::vector<GpuDevice> gpus;
     std::thread probe;
     std::atomic<bool> probe_done{false};
 
@@ -1832,6 +1846,10 @@ void SetEnv(const wchar_t* name, const std::string& value) {
     SetEnvironmentVariableW(name, value.empty() ? nullptr : Widen(value).c_str());
 }
 
+// The GPU picker (Settings > Display; defined with the probe below).
+App::GpuDevice ParseGpuLine(const std::string& line);
+int ResolveGpuIndex(const std::vector<App::GpuDevice>& gpus, const std::string& identity);
+
 bool UpdateBusy();
 
 void StartGame() {
@@ -1849,6 +1867,35 @@ void StartGame() {
     SetEnv(L"BB_NEO", EffectiveRenderRes() != "1080" ? "1" : "0");  // the resolution picks the path
     SetEnv(L"BB_LANGUAGE", GameLanguage());
     SetEnv(L"BB_DISPLAY", a.launcher.Get("display"));
+    // The game's GPU: the stored "vendorID:name" resolved to this run's Vulkan index through
+    // a fresh --list-devices (driver updates reorder it). No match falls back to Auto.
+    {
+        const std::string identity = a.launcher.Get("gpu");
+        std::string gpu_id;
+        if (!identity.empty()) {
+            const fs::path tool = a.bin / L"bb-gpu-capabilities.exe";
+            const Captured fresh =
+                RunCaptured(tool.wstring(), Quote(tool.wstring()) + L" --list-devices", a.bin, 10000);
+            std::vector<App::GpuDevice> gpus;
+            std::stringstream gs(fresh.output);
+            std::string line;
+            while (std::getline(gs, line)) {
+                line = Trim(line);
+                if (line.empty()) continue;
+                App::GpuDevice gpu = ParseGpuLine(line);
+                if (gpu.index >= 0) gpus.push_back(std::move(gpu));
+            }
+            const int index = ResolveGpuIndex(gpus, identity);
+            if (index >= 0) {
+                gpu_id = std::to_string(index);
+            } else {
+                a.launcher.Set("gpu", "");
+                SaveLauncher();
+                AddLog("GPU \"" + identity + "\" not found: using Auto (recommended)");
+            }
+        }
+        SetEnv(L"BB_GPU_ID", gpu_id);
+    }
     SetEnv(L"BB_PRESENT_MODE", a.launcher.Get("present_mode", "Mailbox"));
     SetEnv(L"BB_GAMEPAD", a.launcher.Get("gamepad"));
     SetEnv(L"BB_MENU_LANGUAGE", g_spanish ? "es" : "en");  // the in-game menu follows the launcher
@@ -2378,6 +2425,65 @@ int SelectedPanelHz() {
     return PanelHzForDisplayIndex(index);
 }
 
+// The GPU combo (Settings > Display) reads bb-gpu-capabilities --list-devices:
+// "index<tab>vendorID<tab>name<tab>type<tab>vramMiB<tab>driver" per line.
+bool IsDozenGpu(const std::string& name) {
+    return name.rfind("Microsoft Direct3D12", 0) == 0;
+}
+
+App::GpuDevice ParseGpuLine(const std::string& line) {
+    App::GpuDevice gpu;
+    size_t field = 0, start = 0;
+    std::string parts[6];
+    for (size_t i = 0; i <= line.size() && field < 6; ++i) {
+        if (i == line.size() || line[i] == '\t') {
+            parts[field++] = line.substr(start, i - start);
+            start = i + 1;
+        }
+    }
+    if (field < 6) return gpu;
+    gpu.index = std::atoi(parts[0].c_str());
+    gpu.vendor = parts[1];
+    gpu.name = parts[2];
+    gpu.type = parts[3];
+    gpu.vram = parts[4];
+    gpu.driver = parts[5];
+    gpu.identity = gpu.vendor + ":" + gpu.name;
+    gpu.dozen = IsDozenGpu(gpu.name);
+    gpu.label = gpu.name + " \u2014 " + gpu.vram + " MiB";
+    if (gpu.dozen) gpu.label += " (compatibility)";
+    return gpu;
+}
+
+// Entries for the combo: CPU-type devices are not usable and are skipped; Dozen
+// compatibility entries go last. Auto ("" identity) always stays first.
+std::vector<App::GpuDevice> GpuEntries(const std::vector<App::GpuDevice>& gpus) {
+    std::vector<App::GpuDevice> entries, compat;
+    for (const auto& gpu : gpus) {
+        if (gpu.index < 0 || gpu.type == "cpu") continue;
+        if (gpu.dozen)
+            compat.push_back(gpu);
+        else
+            entries.push_back(gpu);
+    }
+    entries.insert(entries.end(), compat.begin(), compat.end());
+    return entries;
+}
+
+// The stored identity ("vendorID:name", "" = Auto) to this probe's BB_GPU_ID index;
+// -1 keeps the default (Auto) when nothing stored matches.
+int ResolveGpuIndex(const std::vector<App::GpuDevice>& gpus, const std::string& identity) {
+    if (identity.empty()) return -1;
+    for (const auto& gpu : GpuEntries(gpus))
+        if (gpu.identity == identity) return gpu.index;
+    return -1;
+}
+
+// Intel (0x8086) or an integrated GPU: still experimental, with a known igvk64.dll crash.
+bool GpuNeedsIgpWarning(const App::GpuDevice& gpu) {
+    return gpu.vendor == "0x8086" || gpu.type == "integrated";
+}
+
 void StartProbe() {
     App& a = g_app;
     if (a.probe.joinable()) a.probe.join();
@@ -2408,9 +2514,19 @@ void StartProbe() {
             const auto t = line.find('\t');
             if (t != std::string::npos) pads.emplace_back(line.substr(0, t), line.substr(t + 1));
         }
+        std::vector<App::GpuDevice> gpus;
+        const Captured g = RunCaptured(tool.wstring(), Quote(tool.wstring()) + L" --list-devices", app.bin, 10000);
+        std::stringstream gs(g.output);
+        while (std::getline(gs, line)) {
+            line = Trim(line);
+            if (line.empty()) continue;
+            App::GpuDevice gpu = ParseGpuLine(line);
+            if (gpu.index >= 0) gpus.push_back(std::move(gpu));
+        }
         std::scoped_lock lock{app.mutex};
         app.displays = std::move(displays);
         app.gamepads = std::move(pads);
+        app.gpus = std::move(gpus);
         app.probe_done = true;
     });
 }
@@ -3985,6 +4101,45 @@ void SettingsTab() {
                 }
             }
             ImGui::EndCombo();
+        }
+    }
+    {
+        // The game's GPU (launcher.ini gpu = "vendorID:name", "" = Auto): resolved to this
+        // run's BB_GPU_ID index when the game starts. CPU-type devices are skipped; Dozen
+        // (Microsoft Direct3D12) entries are compatibility fallbacks, listed last.
+        std::scoped_lock lock{a.mutex};
+        const std::string current = a.launcher.Get("gpu");
+        const std::vector<App::GpuDevice> entries = GpuEntries(a.gpus);
+        std::string preview = T("Automática (recomendada)", "Auto (recommended)");
+        const App::GpuDevice* picked = nullptr;
+        for (const auto& gpu : entries) {
+            if (gpu.identity == current) {
+                preview = gpu.label;
+                picked = &gpu;
+            }
+        }
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22.0f);
+        if (ImGui::BeginCombo(T("GPU", "GPU"), preview.c_str())) {
+            if (ImGui::Selectable(T("Automática (recomendada)", "Auto (recommended)"), current.empty())) {
+                a.launcher.Set("gpu", "");
+                SaveLauncher();
+            }
+            for (const auto& gpu : entries) {
+                ImGui::PushID(gpu.identity.c_str());
+                if (ImGui::Selectable(gpu.label.c_str(), gpu.identity == current)) {
+                    a.launcher.Set("gpu", gpu.identity);
+                    SaveLauncher();
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+        if (picked && GpuNeedsIgpWarning(*picked)) {
+            ImGui::TextColored(kYellow, "%s",
+                               T("Gráfica integrada: experimental — actualiza el driver; se vio un cierre en "
+                                 "igvk64.dll con la versión 31.0.101.1999.",
+                                 "Integrated GPU: experimental — update drivers; a crash was seen in igvk64.dll "
+                                 "with version 31.0.101.1999."));
         }
     }
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
