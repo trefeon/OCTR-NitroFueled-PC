@@ -151,6 +151,11 @@ backups and imports (including decrypted PS4 saves), and optional DLC: add your 
 content is in the game). Both Windows and Linux launchers let you choose the DLC folder; their
 existing defaults remain unchanged. Spanish and English.
 
+**Recommended for your hardware** (Windows launcher: Settings): detects the GPU name, dedicated
+VRAM and panel refresh, and one click applies the matched tier (resolution by VRAM, upscaler,
+Mailbox, async on). The FPS cap is `min(panel Hz, 60)`: the game was built for 60 with the 60 FPS
+patch, and above 60 the game logic itself speeds up.
+
 ### Which game dumps work
 
 The launcher needs the game as **folders of decrypted files** from **CUSA13795** (the USA
@@ -163,7 +168,7 @@ choose a folder, the launcher says in green or red what it found.
 | Dumped from your own PS4 with a game dumper | `eboot.bin`, `sce_module\`, `sce_sys\param.sfo`… directly in each folder (base, update) | Yes |
 | Extracted with **PS4 PKG Tool** | `Image0\` (eboot.bin, sce_module, the game data) and `Sc0\` (param.sfo and the rest of sce_sys) | Yes, from v0.3: choose the folder that holds `Image0` and `Sc0` and press *Prepare the game*. With v0.2.1, first copy **everything** in `Image0` to that folder and everything in `Sc0` to a new `sce_sys` folder in it |
 | Any other tool | Works if the files end up in one of the two layouts above | Yes |
-| CUSA13795 base + 1.21 update PKGs (Windows launcher) | One base `.pkg`, one update `.pkg` and optional matching DLC `.pkg` files in one folder | Yes: press **Import PKG folder…** on the Play page, choose the folder and a game-library destination (see below) |
+| CUSA13795 base + 1.21 update PKGs (Windows launcher) | One base `.pkg`, one update `.pkg` and optional matching DLC `.pkg` files in one folder | Yes: press **Import PKG folder…** on the Play page and choose that folder; it installs into `games/` by default (see below) |
 | A single `.pkg` file that was not extracted | | No: extract it first, or import the full base + update set with Import PKG folder. Only the DLC tab takes lone `.pkg` files |
 | The European edition (CUSA14876) | | Yes, from v0.5.3, also online with the USA edition |
 | Another region or edition (JP…) | | No: each one has a different executable |
@@ -173,18 +178,23 @@ Both builds of the 1.21 update work (for firmware 5.05 and for 6.72+). If someth
 launcher's log and `user\last_run.log` say which file is missing; attach `last_run.log` when you
 [open an issue](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/issues).
 
-**Import PKG folder (Windows launcher):** choose the folder with your own CUSA13795 base and
-1.21 update PKGs plus any matching DLC PKGs, then choose a game-library destination. The
-launcher classifies each package with the bundled `out\pkg_extractor.exe`, extracts base and
-update into a unique `stage-*` directory on that destination volume, checks both `param.sfo`
-trees (CUSA13795, update `01.21`), merges them, gates on the normal game check, and only then
-promotes the result to a new unused `CUSA13795-1.21` install and selects it. Existing installs
-are never overwritten; failure or cancel removes only that import's staging and keeps the
-current game folder. Matching DLC is copied raw into the configured DLC folder (never
-extracted, never overwritten): CTR Nitro-Fueled's DLC only carry the license, and the port
-reports them installed from the package header and `param.sfo`. The portable ZIP bundles the
-extractor, its `zlib1.dll`/`libc++.dll` and the shadPS4Plus GPL notices; it carries no PKGs,
-game files or saves.
+**Import PKG folder (Windows launcher):** pick the single folder holding your own CUSA13795
+base and 1.21 update PKGs plus any matching DLC PKGs (file names do not matter). The launcher
+first shows a pre-flight review — one row per package with its role in green (base game, 1.21
+update, DLC) or red (anything else: two bases, a missing update, another title or region) —
+and a *How to prepare…* button opens a guide popup covering the set. *Import* classifies each
+package with the bundled `out\pkg_extractor.exe`, extracts base and update into a unique
+`stage-*` directory on the library volume with determinate file progress, checks both
+`param.sfo` trees (CUSA13795, update `01.21`), merges them, gates on the normal game check, and
+only then promotes the result to a new unused `CUSA13795-1.21` install and selects it, reporting
+*Game ready*. Existing installs are never overwritten; failure or cancel removes only that
+import's staging. Matching DLC is copied raw into the configured DLC folder (never extracted,
+never overwritten): CTR Nitro-Fueled's DLC only carry the license, and the port reports them
+installed from the package header and `param.sfo`. A first run in a fresh portable folder shows
+a one-time setup wizard that creates `games/` (the install library, shipped empty in the ZIP)
+and `dlc/` next to the launcher. The portable ZIP bundles the extractor, its
+`zlib1.dll`/`libc++.dll` and the shadPS4Plus GPL notices; it carries no PKGs, game files or
+saves.
 
 **Or build it yourself:**
 

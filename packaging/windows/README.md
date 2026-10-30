@@ -54,15 +54,19 @@ Win32 + Direct3D 11, linked statically, no DLLs) is what players open:
 - **Play**: base game and 1.21 update folders (told apart by `param.sfo`), merged with hard links
   into `CUSA13795-1.21`, checked with `scripts/game_check.py`; starts `run.py` with the bundled
   Python in a job object and shows its output. **Import PKG folder…** takes a folder with one
-  CUSA13795 base PKG, one 1.21 update PKG and optional matching DLC PKGs instead: pick the
-  source folder and a game-library destination, and the launcher classifies each package with
-  the bundled `out\pkg_extractor.exe` (`--check-type`), extracts base and update into a unique
-  `stage-*` directory on the destination volume (streamed log, cancellable), validates both
-  `param.sfo` trees (CUSA13795; update `01.21`), merges them into the staging tree, gates on
-  `scripts/game_check.py`, then atomically renames the validated tree to a new unused
-  `CUSA13795-1.21` install and selects it. Existing installs are never overwritten (a name
-  collision needs a different destination); failure or cancel removes only that import's
-  staging and leaves the current game folder unchanged. Source PKGs are read-only inputs.
+  CUSA13795 base PKG, one 1.21 update PKG and optional matching DLC PKGs instead: pick that one
+  source folder (file names do not matter) and the launcher first shows a pre-flight review —
+  one row per package with its role in green or red — plus a *How to prepare…* guide popup.
+  *Import* classifies each package with the bundled `out\pkg_extractor.exe` (`--check-type`),
+  extracts base and update into a unique `stage-*` directory on the library volume (determinate
+  file progress, streamed log, cancellable), validates both `param.sfo` trees (CUSA13795; update
+  `01.21`), merges them into the staging tree, gates on `scripts/game_check.py`, then atomically
+  renames the validated tree to a new unused `CUSA13795-1.21` install, selects it and reports
+  *Game ready*. The library defaults to `<launcher root>\games` (`Change...` picks another
+  folder); existing installs are never overwritten, and failure or cancel removes only that
+  import's staging and leaves the current game folder unchanged. Source PKGs are read-only inputs.
+  A first run in a fresh folder shows a one-time setup wizard that creates `games/` and `dlc/`
+  next to the launcher.
 - **Settings**: FPS limit, background shader compiles, fullscreen, FPS counter (`bbport.ini`, the
   in-game menu's keys); monitor, present mode, controller, game language, PS4 Pro mode, and the DLC
   folder (`launcher.ini`, passed as `BB_*` variables). The Gamepad tab can bind up to four buttons
@@ -169,7 +173,8 @@ versioned pin record (`licenses\shadps4plus-pkg-LICENSE.txt`,
 `patches\pkg-extractor-0x403-tail.patch` stay in this repository). The ZIP carries no PKGs, game
 files, saves or `user/` data: the player's source packages remain read-only inputs for Import PKG
 folder, and the game-library destination plus per-import `stage-*` directories live outside the
-package.
+package. The default library ships inside the ZIP as an empty `games/` entry; the first import
+(or the setup wizard) fills it in.
 
 The [manual build guide](../../docs/MANUAL_BUILDS.md) covers the full packaging sequence and checksum check. Run the packager in the MSYS2 CLANG64 shell:
 
