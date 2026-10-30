@@ -56,6 +56,7 @@
 #include "nat_check.h"
 #include "port_update.h"
 #include "settings_import.h"
+#include "launcher_bindings.h"
 #include "launcher_paths.h"
 #include "discord_presence.h"
 #include "launcher_locales.h"
@@ -648,7 +649,7 @@ constexpr Choice kPresentModes[] = {
     {"FIFO relajado", "FIFO Relaxed", "FifoRelaxed"},
     {"Inmediato (sin VSync)", "Immediate (no VSync)", "Immediate"},
 };
-constexpr int kFpsLimits[] = {0, 30, 60, 72, 90, 120, 144, 240};
+constexpr int kFpsLimits[] = {0, 30, 60, 72, 90, 120, 144, 165, 240};
 
 struct SaveParam {  // OrbisSaveDataParam
     char title[128], subtitle[128], detail[1024];
@@ -825,6 +826,7 @@ std::string EffectiveRenderRes();
 
 fs::path LauncherIni() { return g_app.root / L"launcher.ini"; }
 fs::path GameIni() { return g_app.root / L"bbport.ini"; }
+fs::path DlcRoot();
 
 void SaveLauncher() {
     App& a = g_app;
@@ -832,6 +834,8 @@ void SaveLauncher() {
     a.launcher.Set("base_dir", PathText(a.base_dir));
     a.launcher.Set("update_dir", PathText(a.update_dir));
     a.launcher.Set("ui_language", g_language);
+    a.launcher.Set("dlc_dir", PathText(LauncherPaths::PersistedDlcDirectory(
+                                      a.root, TextPath(a.launcher.Get("dlc_dir")))));
     if (!a.launcher.Save(LauncherIni(), "# CTR-NitroFueled-PC launcher")) {
         a.notice = T("No se pudo guardar launcher.ini.", "Could not save launcher.ini.");
     }
@@ -1698,8 +1702,11 @@ void StartPkgImport(const fs::path& pkg_dir, const fs::path& dest_dir) {
     si.hStdOutput = write;
     si.hStdError = write;
     PROCESS_INFORMATION pi{};
-    const BOOL ok = CreateProcessW(a.python->exe.c_str(), cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
-                                   nullptr, a.root.c_str(), &si, &pi);
+    // Suspended: the importer joins the job below before it can run, so no
+    // extractor grandchild can escape the job between spawn and assignment.
+    const BOOL ok = CreateProcessW(a.python->exe.c_str(), cmd.data(), nullptr, nullptr, TRUE,
+                                   CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, a.root.c_str(), &si,
+                                   &pi);
     CloseHandle(write);
     if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
     if (!ok) {
@@ -1847,6 +1854,7 @@ void StartGame() {
     SetEnv(L"BB_MENU_LANGUAGE", g_spanish ? "es" : "en");  // the in-game menu follows the launcher
     SetEnv(L"BB_SAVE_LOG", a.launcher.Flag("save_log", false) ? "1" : "");
     SetEnv(L"BB_DLC", a.launcher.Flag("dlc", true) ? "1" : "0");
+    SetEnv(L"BB_DLC_DIR", PathText(DlcRoot()));
     SetEnv(L"BB_DLC_DISABLED", a.launcher.Get("dlc_disabled"));
     SetEnv(L"BB_FULLSCREEN", "");  // bbport.ini's fullscreen= (the menu switch) decides
     SetEnv(L"PYTHONUTF8", "1");
@@ -2840,8 +2848,6 @@ void HelpMarker(const char* text) {
         ImGui::EndTooltip();
     }
 }
-
-const char* PerfReportsText();  // the performance diagnostic's explanation (PerfReportsPopup)
 
 void GameFlag(const char* key, const char* label, bool fallback, const char* help = nullptr) {
     bool v = g_app.game.Flag(key, fallback);
@@ -3954,8 +3960,6 @@ void SettingsTab() {
                "del juego (Insert o L3+R3), pestaña Sala.",
                "In an online room, each player's ping in ms, under the FPS counter. Also in the in-game menu "
                "(Insert or L3+R3), Room tab."));
-    GameFlag("perf_reports", T("Enviar datos anónimos de rendimiento", "Send anonymous performance data"), false,
-             PerfReportsText());
     {
         std::scoped_lock lock{a.mutex};
         const std::string current = a.launcher.Get("display");
@@ -5089,11 +5093,13 @@ void SavesTab() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// DLC (optional): the player's add-on packages in <port>\dlc, as .pkg files or extracted folders.
-// CTR Nitro-Fueled's DLC hold only the license; scripts/content_profile.py reads the same folder
-// and the runtime reports each one installed (BB_DLC, BB_DLC_DISABLED from launcher.ini).
+// DLC (optional): the player's add-on packages in the configured folder (default <port>\dlc),
+// as .pkg files or extracted folders. CTR Nitro-Fueled's DLC hold only the license;
+// scripts/content_profile.py reads the folder selected by BB_DLC_DIR.
 
-fs::path DlcRoot() { return g_app.root / L"dlc"; }
+fs::path DlcRoot() {
+    return LauncherPaths::ResolveDlcDirectory(g_app.root, TextPath(g_app.launcher.Get("dlc_dir")));
+}
 
 uint32_t Be32(const char* p) {
     return uint32_t(uint8_t(p[0])) << 24 | uint32_t(uint8_t(p[1])) << 16 | uint32_t(uint8_t(p[2])) << 8 | uint32_t(uint8_t(p[3]));
@@ -5233,18 +5239,40 @@ void DlcTab() {
                              "(el contenido ya está en el juego); el port los marca como instalados al iniciar.",
                              "Optional: the game runs the same without DLC. CTR Nitro-Fueled's DLC only carry the license "
                              "(the content is already in the game); the port reports them installed at start."));
-    ImGui::TextColored(kGrey, "%s", T("Usa tus propios paquetes DLC de PS4 (.pkg) de CUSA13795. Se copian a la carpeta dlc del "
-                                      "port; tus archivos originales no cambian.",
-                                      "Use your own PS4 DLC packages (.pkg) for CUSA13795. They are copied into the port's "
-                                      "dlc folder; your original files are not changed."));
+    ImGui::TextColored(kGrey, "%s", T("Usa tus propios paquetes DLC de PS4 (.pkg) de CUSA13795. Se copian en la carpeta DLC "
+                                      "seleccionada; tus archivos originales no cambian.",
+                                      "Use your own PS4 DLC packages (.pkg) for CUSA13795. They are copied into the selected "
+                                      "DLC folder; your original files are not changed."));
     ImGui::PopTextWrapPos();
     ImGui::Spacing();
     LauncherFlag("dlc", T("Activar los DLC", "Enable DLC"), true);
     const bool enabled = a.launcher.Flag("dlc", true);
     std::vector<std::string> disabled = SplitList(a.launcher.Get("dlc_disabled"));
 
+    ImGui::SeparatorText(T("Carpeta de DLC", "DLC folder"));
+    ImGui::TextWrapped("%s", PathText(DlcRoot()).c_str());
+    ImGui::BeginDisabled(a.game_running);
+    if (ImGui::Button(T("Cambiar carpeta...", "Change folder..."))) {
+        const fs::path current = DlcRoot();
+        std::error_code ec;
+        const fs::path start = fs::is_directory(current, ec) ? current : a.root;
+        if (const auto selected = PickFolder(a.hwnd, L"DLC folder / Carpeta de DLC", start)) {
+            a.launcher.Set("dlc_dir", PathText(LauncherPaths::AbsoluteNormalizedDlcDirectory(a.root, *selected)));
+            SaveLauncher();
+            a.dlc_dirty = true;
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(T("Usar carpeta predeterminada", "Use default folder"))) {
+        a.launcher.Set("dlc_dir", "");
+        SaveLauncher();
+        a.dlc_dirty = true;
+    }
+    ImGui::EndDisabled();
+    ImGui::Spacing();
+
     ImGui::SeparatorText(T("DLC encontrados", "DLC found"));
-    if (a.dlc.empty()) ImGui::TextColored(kGrey, "%s", T("No hay DLC en la carpeta dlc.", "No DLC in the dlc folder."));
+    if (a.dlc.empty()) ImGui::TextColored(kGrey, "%s", T("No hay DLC en la carpeta seleccionada.", "No DLC in the selected folder."));
     ImGui::BeginDisabled(!enabled);
     for (const auto& d : a.dlc) {
         ImGui::PushID(d.file.c_str());
@@ -5274,7 +5302,7 @@ void DlcTab() {
     ImGui::Spacing();
     if (ImGui::Button(T("Añadir DLC (.pkg)...", "Add DLC (.pkg)..."))) AddDlcPackages();
     ImGui::SameLine();
-    if (ImGui::Button(T("Abrir la carpeta dlc", "Open the dlc folder"))) {
+    if (ImGui::Button(T("Abrir carpeta de DLC", "Open the DLC folder"))) {
         std::error_code ec;
         fs::create_directories(DlcRoot(), ec);
         OpenInShell(DlcRoot());
@@ -5319,49 +5347,6 @@ void NickPopup() {
     if (ImGui::Button(T("Cancelar", "Cancel"))) {
         a.game.Load(GameIni());  // drop what was typed: every other setting is already saved
         SyncOnlineBuffers();
-        ImGui::CloseCurrentPopup();
-    }
-    ImGui::EndPopup();
-}
-
-/// The anonymous performance diagnostic (bbport.ini perf_reports, scripts/perf_report.py): asked
-/// once, while it is neither 1 nor 0. A plain question, no alarm: what is sent and what is not.
-const char* PerfReportsText() {
-    return T("Al cerrar el juego, OCTR puede enviar un resumen anónimo de cómo le fue a tu PC: tarjeta "
-             "gráfica, procesador y memoria, los ajustes gráficos y los FPS de cada pista. Nada personal: ni "
-             "tu apodo, ni tus partidas, ni tus amigos, y tu IP no se guarda. Sirve para saber en qué PCs "
-             "hay que mejorar el juego. Siempre queda una copia en la carpeta perf.",
-             "When the game closes, OCTR can send an anonymous summary of how your PC did: graphics card, "
-             "processor and memory, the graphics settings and the FPS of each track. Nothing personal: not "
-             "your nickname, your races or your friends, and your IP is not stored. It shows which PCs the "
-             "game needs to improve on. A copy always stays in the perf folder.");
-}
-
-void PerfReportsPopup() {
-    App& a = g_app;
-    // Shown once per launcher start, after any other question: on the first start of a new folder
-    // the settings import opened in the same frame and replaced it, so it never came back.
-    static bool shown = false;
-    const std::string v = a.game.Get("perf_reports");
-    if (!shown && v != "1" && v != "0" && !a.game_running && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId))
-        ImGui::OpenPopup("perf_reports");
-    if (!ImGui::BeginPopupModal("perf_reports", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
-        return;
-    shown = true;
-    ImGui::TextUnformatted(T("¿Nos ayudas a mejorar OCTR?", "Help us improve OCTR?"));
-    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
-    ImGui::TextColored(kGrey, "%s", PerfReportsText());
-    ImGui::TextColored(kGrey, "%s", T("Puedes cambiarlo cuando quieras en Ajustes.", "You can change it any time in Settings."));
-    ImGui::PopTextWrapPos();
-    if (ImGui::Button(T("Sí, enviar datos anónimos", "Yes, send anonymous data"))) {
-        a.game.Set("perf_reports", "1");
-        SaveGameIni();
-        ImGui::CloseCurrentPopup();
-    }
-    ImGui::SameLine();
-    if (ImGui::Button(T("No, gracias", "No, thanks"))) {
-        a.game.Set("perf_reports", "0");
-        SaveGameIni();
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
@@ -5452,7 +5437,7 @@ void SaveConfirmations() {
             ImGui::TextColored(kGrey, "%s", T("Tus partidas actuales se guardan antes en una copia automática.",
                                               "Your current saves are backed up automatically first."));
         } else if (a.confirm_action == 3) {
-            ImGui::Text(T("¿Quitar %s de la carpeta dlc?", "Remove %s from the dlc folder?"), name.c_str());
+            ImGui::Text(T("¿Quitar %s de la carpeta DLC seleccionada?", "Remove %s from the selected DLC folder?"), name.c_str());
             ImGui::TextColored(kGrey, "%s", T("Solo se borra la copia del port.", "Only the port's copy is deleted."));
         } else {
             ImGui::Text(T("¿Borrar la copia %s? No se puede deshacer.", "Delete the backup %s? This cannot be undone."), name.c_str());
@@ -5582,17 +5567,6 @@ std::atomic<int> g_key_capture{-1};      // the input waiting for a key, -1 none
 std::atomic<unsigned> g_key_captured{0};  // scan code + 1 (0: nothing yet)
 bool g_key_replace = false;                 // the captured key replaces the default binding
 
-std::vector<std::string> SplitKeys(const std::string& value) {
-    std::vector<std::string> keys;
-    std::stringstream ss(value);
-    std::string key;
-    while (std::getline(ss, key, ',')) {
-        key = Trim(key);
-        if (!key.empty()) keys.push_back(key);
-    }
-    return keys;
-}
-
 void KeyboardTab() {
     App& a = g_app;
     ImGui::TextWrapped("%s", T("Teclas del jugador 1. El teclado funciona a la vez que el mando. Pulsa \"Cambiar\" y luego la "
@@ -5612,14 +5586,8 @@ void KeyboardTab() {
                        name && code != 0x152) {
                 const KeyInput& in = kKeyInputs[capturing];
                 const std::string key = std::string("key.") + in.id;
-                auto keys = g_key_replace ? std::vector<std::string>{} : SplitKeys(a.game.Get(key));
-                if (std::find(keys.begin(), keys.end(), name) == keys.end()) {
-                    if (keys.size() >= 4) keys.erase(keys.begin());
-                    keys.push_back(name);
-                }
-                std::string value;
-                for (const auto& k : keys) value += (value.empty() ? "" : ",") + k;
-                a.game.Set(key, value);
+                a.game.Set(key, LauncherBindings::CaptureKeyboardBinding(a.game.Get(key, in.fallback), name,
+                                                                          g_key_replace));
                 SaveGameIni();
                 g_key_capture = -1;
             } else {
@@ -5639,7 +5607,7 @@ void KeyboardTab() {
             const KeyInput& in = kKeyInputs[i];
             const std::string key = std::string("key.") + in.id;
             const bool custom = a.game.values.count(key) > 0;
-            const auto keys = SplitKeys(custom ? a.game.Get(key) : in.fallback);
+            const auto keys = LauncherBindings::Split(custom ? a.game.Get(key) : in.fallback);
             ImGui::PushID(i);
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
@@ -5819,17 +5787,23 @@ void GamepadTab() {
                                "Pulsa \"Cambiar\" y presiona el botón en tu mando o selecciónalo en la pantalla. Se guarda en bbport.ini y se aplica en el próximo inicio.",
                                "Player 1 gamepad button mapping. Supports Xbox, PlayStation (DualShock / DualSense), Switch Pro and generic controllers. "
                                "Press \"Change\" and press the button on your controller or choose it on screen. Saved to bbport.ini, applies on next launch."));
+    ImGui::TextColored(kGrey, "%s", T("Cambiar añade un botón distinto a la asignación personalizada (hasta 4); Quitar borra todos.",
+                                      "Change adds a distinct button to the custom binding (up to 4); Clear removes all."));
 
     const int capturing = g_pad_capture;
+    auto AssignButton = [&](const PadInput& in, const char* button) {
+        const std::string key = std::string("pad.") + in.id;
+        a.game.Set(key, LauncherBindings::AppendPadBinding(a.game.Get(key), button));
+        SaveGameIni();
+        g_pad_capture = -1;
+    };
     if (capturing >= 0) {
         const char* polled = PollGamepadButton();
         if (g_pad_waiting_release) {
             if (!polled) g_pad_waiting_release = false;
         } else if (polled) {
             const PadInput& in = kPadInputs[capturing];
-            a.game.Set(std::string("pad.") + in.id, polled);
-            SaveGameIni();
-            g_pad_capture = -1;
+            AssignButton(in, polled);
         }
     }
 
@@ -5844,11 +5818,7 @@ void GamepadTab() {
         ImGui::Spacing();
 
         auto AddBtn = [&](const char* id, const char* label) {
-            if (ImGui::Button(label)) {
-                a.game.Set(std::string("pad.") + in.id, id);
-                SaveGameIni();
-                g_pad_capture = -1;
-            }
+            if (ImGui::Button(label)) AssignButton(in, id);
             ImGui::SameLine();
         };
 
@@ -5891,7 +5861,7 @@ void GamepadTab() {
             const PadInput& in = kPadInputs[i];
             const std::string key = std::string("pad.") + in.id;
             const bool custom = a.game.values.count(key) > 0;
-            const auto buttons = SplitKeys(custom ? a.game.Get(key) : in.fallback);
+            const auto buttons = LauncherBindings::Split(custom ? a.game.Get(key) : in.fallback);
 
             ImGui::PushID(i + 200);
             ImGui::TableNextRow();
@@ -7716,8 +7686,7 @@ void Frame() {
     SaveConfirmations();
     NickPopup();
     JoinServerPopup();
-    ImportPopup();  // before the diagnostic's question, which waits for it
-    PerfReportsPopup();
+    ImportPopup();
     ShaderProgressPopup();
     if (a.confirm_clear_cache) {
         ImGui::OpenPopup("clear_cache");
@@ -8065,6 +8034,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             if (op == L"--import" && argc == 4) result = ImportSaves(argv[2]);
             else if (op == L"--restore" && argc == 4) result = RestoreBackup(argv[2]);
             else if (op == L"--dlc") {
+                g_app.launcher.Load(LauncherIni());
                 for (const auto& d : ScanDlc())
                     result += d.file + " | " + d.title + " | " + d.label + " | " + (d.ok ? "ok" : d.problem) + "\n";
             } else if (op == L"--aes") {

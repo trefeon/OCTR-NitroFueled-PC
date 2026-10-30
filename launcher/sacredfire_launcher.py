@@ -152,6 +152,8 @@ DEFAULTS = {
     "mangohud": False,
     "vk_validation": False,
     "extra_env": "",
+    # Empty uses inherited BB_DLC_DIR when set, otherwise DATA_DIR/dlc; relative paths use PORT_DIR.
+    "dlc_dir": "",
     # DLC in the data folder's dlc/ (run.py BB_DLC_DIR): all on, some turned off by label.
     "dlc": True,
     "dlc_disabled": "",
@@ -272,13 +274,6 @@ def load_ini():
     return values, lines
 
 
-def perf_reports_text():
-    return tr("When the game closes, OCTR can send an anonymous summary of how your PC did: graphics card, "
-              "processor and memory, the graphics settings and the FPS of each track. Nothing personal: not "
-              "your nickname, your races or your friends, and your IP is not stored. It shows which PCs the "
-              "game needs to improve on. A copy always stays in the perf folder.")
-
-
 def save_ini(values, lines):
     """Rewrites the edited keys in place, appends missing ones, keeps every other line. A value
     of None removes its line (the game's default again)."""
@@ -299,6 +294,19 @@ def save_ini(values, lines):
         if key not in written and value is not None:
             out.append(f"{key}={value}")
     ini_path().write_text("\n".join(out) + "\n")
+
+
+def resolve_dlc_dir(settings):
+    """Return the selected DLC directory; relative setting paths use the port directory."""
+    configured = settings.get("dlc_dir")
+    if configured:
+        path = Path(configured).expanduser()
+        return path if path.is_absolute() else PORT_DIR / path
+    inherited = os.environ.get("BB_DLC_DIR")
+    if inherited:
+        path = Path(inherited).expanduser()
+        return path if path.is_absolute() else PORT_DIR / path
+    return DATA_DIR / "dlc"
 
 
 def game_environment(s):
@@ -332,6 +340,7 @@ def game_environment(s):
         if "=" in item:
             key, value = item.split("=", 1)
             env[key] = value
+    env["BB_DLC_DIR"] = str(resolve_dlc_dir(s))
     return env
 
 
@@ -947,7 +956,6 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.build()
         self.connect("close-request", self.on_close)
         GLib.timeout_add_seconds(1, self.tick)
-        GLib.timeout_add_seconds(2, lambda: self.ask_perf_reports() and False)
 
     def build(self):
         install_css()
@@ -1301,9 +1309,6 @@ class LauncherWindow(Adw.ApplicationWindow):
                         "(Insert or L3+R3), Room tab."),
             active=self.ini.get("show_ping") == "1")
         screen.add(self.ping_row)
-        self.perf_row = Adw.SwitchRow(title=tr("Send anonymous performance data"), subtitle=perf_reports_text(),
-                                      active=self.ini.get("perf_reports") == "1")
-        screen.add(self.perf_row)
         page.add(screen)
 
         sound = Adw.PreferencesGroup(title=tr("Sound"))
@@ -1585,8 +1590,6 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.ini, self.ini_lines = load_ini()
         self.ini["show_fps"] = "1" if self.fps_row.get_active() else "0"
         self.ini["show_ping"] = "1" if self.ping_row.get_active() else "0"
-        if self.perf_row.get_active() or self.ini.get("perf_reports") in ("0", "1"):
-            self.ini["perf_reports"] = "1" if self.perf_row.get_active() else "0"  # unasked stays unasked
         self.ini["split_auto"] = "1" if self.split_auto_row.get_active() else "0"
         self.ini["button_prompts"] = combo_value(self.button_prompts_row)
         self.ini["async_pipelines"] = "1" if self.async_row.get_active() else "0"
@@ -1617,7 +1620,6 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.fill_patches()
         self.fps_row.set_active(self.ini.get("show_fps") == "1")
         self.ping_row.set_active(self.ini.get("show_ping") == "1")
-        self.perf_row.set_active(self.ini.get("perf_reports") == "1")
         self.split_auto_row.set_active(self.ini.get("split_auto") != "0")
         prompts = self.ini.get("button_prompts", "playstation")
         self.button_prompts_row.set_selected(self.button_prompts_row.values.index(prompts)
@@ -2304,7 +2306,7 @@ class LauncherWindow(Adw.ApplicationWindow):
     # --- DLC page ----------------------------------------------------------------------------
 
     def dlc_dir(self):
-        return Path(os.environ.get("BB_DLC_DIR") or DATA_DIR / "dlc")
+        return resolve_dlc_dir(self.settings)
 
     def build_dlc_page(self):
         page = Adw.PreferencesPage()
@@ -2317,7 +2319,14 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.dlc_row = Adw.SwitchRow(title=tr("Enable DLC"), active=self.settings.get("dlc", True))
         self.dlc_row.connect("notify::active", lambda *_: self.on_dlc_enabled())
         intro.add(self.dlc_row)
+        self.dlc_path_row = Adw.ActionRow(title=tr("DLC folder"), subtitle=str(self.dlc_dir()))
+        self.dlc_path_row.add_suffix(flat_button("document-open-symbolic", tr("Choose DLC folder"),
+                                                  self.on_choose_dlc_folder))
+        self.dlc_path_row.add_suffix(flat_button("edit-clear-symbolic", tr("Use default DLC folder"),
+                                                  self.on_reset_dlc_folder))
+        intro.add(self.dlc_path_row)
         actions = Adw.ActionRow(title=tr("Add DLC (.pkg)…"), subtitle=str(self.dlc_dir()))
+        self.dlc_add_row = actions
         add = Gtk.Button(label=tr("Add"), valign=Gtk.Align.CENTER)
         add.add_css_class("suggested-action")
         add.connect("clicked", self.on_add_dlc)
@@ -2332,16 +2341,47 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.fill_dlc()
         return page
 
+    def update_dlc_folder_rows(self):
+        path = str(self.dlc_dir())
+        self.dlc_path_row.set_subtitle(path)
+        self.dlc_add_row.set_subtitle(path)
+
+    def on_choose_dlc_folder(self, _button):
+        dialog = Gtk.FileDialog(title=tr("Choose DLC folder"), modal=True)
+
+        def done(dialog, result):
+            try:
+                folder = dialog.select_folder_finish(result)
+            except GLib.Error:
+                return
+            path = folder.get_path()
+            if path:
+                self.settings["dlc_dir"] = path
+                save_settings(self.settings)
+                self.update_dlc_folder_rows()
+                self.fill_dlc()
+
+        dialog.select_folder(self, None, done)
+
+    def on_reset_dlc_folder(self, _button):
+        self.settings["dlc_dir"] = ""
+        save_settings(self.settings)
+        self.update_dlc_folder_rows()
+        self.fill_dlc()
+
     def fill_dlc(self):
         if self.dlc_group is not None:
             self.dlc_page.remove(self.dlc_group)
         self.dlc_group = Adw.PreferencesGroup(title=tr("DLC found"))
         disabled = {x.strip() for x in self.settings.get("dlc_disabled", "").split(",") if x.strip()}
         items = []
-        if self.dlc_dir().is_dir():
-            for path in sorted(self.dlc_dir().iterdir()):
-                if content_profile.is_candidate(path):
-                    items.append((path, *content_profile.describe_addon(path, GAME_TITLE[0])))
+        try:
+            paths = sorted(self.dlc_dir().iterdir()) if self.dlc_dir().is_dir() else []
+        except OSError:
+            paths = []
+        for path in paths:
+            if content_profile.is_candidate(path):
+                items.append((path, *content_profile.describe_addon(path, GAME_TITLE[0])))
         if not items:
             self.dlc_group.add(Adw.ActionRow(title=tr("No DLC in the dlc folder")))
         for path, label, title, problem in sorted(items, key=lambda i: i[2].lower()):
@@ -2384,7 +2424,11 @@ class LauncherWindow(Adw.ApplicationWindow):
             except GLib.Error:
                 return
             added, problems = 0, []
-            self.dlc_dir().mkdir(parents=True, exist_ok=True)
+            try:
+                self.dlc_dir().mkdir(parents=True, exist_ok=True)
+            except OSError as error:
+                self.toasts.add_toast(Adw.Toast(title=str(error), timeout=8))
+                return
             for i in range(files.get_n_items()):
                 source = Path(files.get_item(i).get_path())
                 _label, _title, problem = content_profile.describe_addon(source, GAME_TITLE[0])
@@ -2642,36 +2686,6 @@ class LauncherWindow(Adw.ApplicationWindow):
                 self.toasts.add_toast(Adw.Toast(title=tr("Could not reset: {}").format(error)))
             self.fill_trophies()
         self.confirm(tr("Lock every trophy again?"), tr("A copy is kept just in case."), tr("Reset"), reset)
-
-    def ask_perf_reports(self):
-        """The anonymous performance diagnostic (bbport.ini perf_reports, scripts/perf_report.py):
-        asked once, while it is neither 1 nor 0. A plain question, no alarm."""
-        if load_ini()[0].get("perf_reports") in ("0", "1"):
-            return
-
-        def answer(_dialog, response):
-            if response not in ("yes", "no"):
-                return
-            self.ini, self.ini_lines = load_ini()
-            self.ini["perf_reports"] = "1" if response == "yes" else "0"
-            save_ini(self.ini, self.ini_lines)
-            self.perf_row.set_active(response == "yes")
-
-        heading = tr("Help us improve OCTR?")
-        body = perf_reports_text() + "\n\n" + tr("You can change it any time in Settings.")
-        if hasattr(Adw, "AlertDialog"):
-            dialog = Adw.AlertDialog(heading=heading, body=body)
-        else:
-            dialog = Adw.MessageDialog(transient_for=self, heading=heading, body=body)
-        dialog.add_response("no", tr("No, thanks"))
-        dialog.add_response("yes", tr("Yes, send anonymous data"))
-        dialog.set_response_appearance("yes", Adw.ResponseAppearance.SUGGESTED)
-        dialog.set_close_response("")  # Escape asks again next time
-        dialog.connect("response", answer)
-        if hasattr(Adw, "AlertDialog"):
-            dialog.present(self)
-        else:
-            dialog.present()
 
     def inform(self, heading, body):
         """A message with a single OK."""
