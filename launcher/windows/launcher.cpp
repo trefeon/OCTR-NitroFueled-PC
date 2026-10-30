@@ -3861,6 +3861,12 @@ void SettingsTab() {
     GameFlag("async_pipelines", T("Compilar shaders en segundo plano (experimental)", "Compile shaders in the background (experimental)"), true,
              T("Menos tirones la primera vez que aparece un efecto; a veces un efecto tarda un fotograma en verse.",
                "Fewer hitches when an effect is first seen; an effect may show up a frame late."));
+    GameFlag("patch_60fps", T("Desbloqueo a 60 FPS", "60 FPS Unlock"), true,
+             T("Ejecuta el juego a 60 FPS. La versión 2.0 también elimina el vsync de doble búfer.",
+               "Runs the game at 60 FPS. Version 2.0 also removes double-buffer vsync."));
+    GameFlag("patch_no_motion_blur", T("Desactivar desenfoque de movimiento", "Disable Motion Blur"), true,
+             T("Desactiva el desenfoque de movimiento: el de la cámara y el de los objetos que se mueven (público, plantas).",
+               "Turns off motion blur: the camera's and that of moving objects (crowd, plants)."));
 
     ImGui::SeparatorText(T("Pantalla", "Display"));
     const std::string temporal = GameTemporal();
@@ -4109,6 +4115,14 @@ void SettingsTab() {
                      "Brazilian Portuguese. The list follows the edition of the game you choose (the European one has "
                      "Spain's Spanish, German, Italian and Arabic). Applied when you press Play."));
     }
+
+    ImGui::SeparatorText(T("Trucos", "Cheats"));
+    GameFlag("patch_unlock_all", T("Desbloquear todo", "Unlock Everything"), false,
+             T("Desbloquea todo el contenido (personajes, pistas, skins) como las demos E3/PAX. Afecta a las partidas guardadas.",
+               "Unlocks all content (characters, tracks, skins) like the E3/PAX demos. Affects saves."));
+    ImGui::TextColored(kYellow, "%s",
+                       T("Afecta a las partidas guardadas: haz una copia en Guardados antes de activarlo.",
+                         "Affects saves: back up in Saves before enabling."));
 
     ImGui::SeparatorText(T("Ventana y Launcher", "Window and Launcher"));
     LauncherFlag("hide_on_play", T("Ocultar ventana del launcher mientras se juega", "Hide launcher window while playing"), false,
@@ -4705,7 +4719,13 @@ bool ModIsOn(const PatchInfo& p) {
 bool VisibleMod(const PatchInfo& p) {
     if (!p.title.empty() && p.title != Narrow(GameTitle())) return false;
     if (p.key.find("Online: custom Demonware key") != std::string::npos) return false;
-    return !p.ini_key || std::strcmp(p.ini_key, "patch_pro_1080p") != 0;
+    if (p.ini_key) {
+        if (std::strcmp(p.ini_key, "patch_60fps") == 0) return false;
+        if (std::strcmp(p.ini_key, "patch_no_motion_blur") == 0) return false;
+        if (std::strcmp(p.ini_key, "patch_unlock_all") == 0) return false;
+        if (std::strcmp(p.ini_key, "patch_pro_1080p") == 0) return false;
+    }
+    return true;
 }
 
 void SetModOn(const PatchInfo& p, bool on) {
