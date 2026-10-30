@@ -30,6 +30,8 @@ inline constexpr u32 kTilingThreadsPerGroup = 64;
 // Upper bound for a single tiling vkCmdDispatch groupCountX. Vulkan only guarantees
 // maxComputeWorkGroupCount[0] >= 65535, so larger dispatches are split into several
 // legal dispatches with a base-texel push constant (never clamped/dropped).
+// Always use through min(device_max, kMaxTilingGroupsX) at the dispatch site;
+// never use this constant raw as a dispatch size.
 inline constexpr u32 kMaxTilingGroupsX = 65536;
 
 struct TilingDispatch {
