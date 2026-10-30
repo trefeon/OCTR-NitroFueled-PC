@@ -752,7 +752,6 @@ struct App {
 
     // Monitors and controllers (bb-gpu-capabilities).
     std::vector<std::pair<std::string, std::string>> displays;  // value (number), label
-    std::vector<int> display_hz;  // panel Hz per displays[i] via EnumDisplaySettings, 60 when unknown
     std::vector<std::pair<std::string, std::string>> gamepads;  // GUID, name
     std::thread probe;
     std::atomic<bool> probe_done{false};
@@ -2314,9 +2313,6 @@ void StartProbe() {
             if (t2 != std::string::npos && line.substr(t2 + 1) == "1") label += g_spanish ? " - principal" : " - primary";
             displays.emplace_back(std::to_string(number), label);
         }
-        std::vector<int> hz;
-        hz.reserve(displays.size());
-        for (size_t i = 0; i < displays.size(); ++i) hz.push_back(PanelHzForDisplayIndex(int(i)));
         const Captured p = RunCaptured(tool.wstring(), Quote(tool.wstring()) + L" --gamepads", app.bin, 10000);
         std::stringstream ps(p.output);
         while (std::getline(ps, line)) {
@@ -2326,7 +2322,6 @@ void StartProbe() {
         }
         std::scoped_lock lock{app.mutex};
         app.displays = std::move(displays);
-        app.display_hz = std::move(hz);
         app.gamepads = std::move(pads);
         app.probe_done = true;
     });
@@ -3565,18 +3560,19 @@ void WidescreenSettings() {
         "(otherwise the game starts at 16:9). No FSR or DLSS; the internal resolution picks the variant."));
 }
 
-void ApplyHwRecommended(const HwRecommend::Recommendation& rec) {
+void ApplyHwRecommended(const HwRecommend::Recommendation& rec, const char* temporal) {
     // Single code path: the same ini keys, through the same Set+Save setters, that the
     // manual controls use (fps_limit/render_res/temporal/async_* in bbport.ini, present_mode
-    // in launcher.ini). The native renderer's combo only offers off/fsr1, so a DLSS pick is
-    // clamped to FSR 1 there instead of storing a key its engine ignores.
+    // in launcher.ini). `temporal` is the preview's post-clamp pick
+    // (ClampTemporalForRenderer), so the advertised upscaler and the stored key agree.
     App& a = g_app;
     a.game.Set("fps_limit", std::to_string(rec.fps_limit));
     a.game.Set("render_res", rec.render_res);
-    const bool native = a.game.Get("renderer") == "native";
-    const bool dlss = std::string(rec.temporal) == "dlss" && !native;
-    a.game.Set("temporal", dlss ? "dlss" : "fsr1");
-    if (dlss) a.game.Set("dlss_quality", "auto");  // the internal resolution decides, as in Auto
+    const bool dlss = std::string(temporal) == "dlss";
+    a.game.Set("temporal", temporal);
+    // An explicit DLSS quality choice stays the player's: only establish the default when
+    // they never chose (empty key). Auto keeps the internal resolution deciding the size.
+    if (dlss && a.game.Get("dlss_quality").empty()) a.game.Set("dlss_quality", "auto");
     a.game.Erase("fsr1");
     a.game.Erase("fsr3");
     a.game.Set("async_pipelines", "1");
@@ -3599,7 +3595,14 @@ void SettingsTab() {
         const bool rtx = gpu.ok && HwRecommend::IsRtxName(gpu.name);
         const HwRecommend::Recommendation rec =
             HwRecommend::RecommendForHardware(gpu.ok ? gpu.vram_bytes : 0, hz, rtx, dlss_files);
-        const std::string upscaler = std::string(rec.temporal) == "dlss" ? "DLSS" : "FSR 1";
+        // Post-clamp pick, shared with ApplyHwRecommended: native+RTX advertises FSR 1, not DLSS.
+        const char* temporal =
+            HwRecommend::ClampTemporalForRenderer(rec.temporal, a.game.Get("renderer") == "native");
+        const bool dlss = std::string(temporal) == "dlss";
+        // The DLSS quality in force (an explicit choice is kept by Apply and shown here).
+        const std::string quality = a.game.Get("dlss_quality", "auto");
+        std::string upscaler = dlss ? "DLSS" : "FSR 1";
+        if (dlss) upscaler += quality == "auto" ? " (auto)" : " (" + quality + ")";
         if (gpu.ok) {
             char detected[256];
             std::snprintf(detected, sizeof detected,
@@ -3618,7 +3621,7 @@ void SettingsTab() {
                       rec.render_res, upscaler.c_str(), rec.fps_limit);
         ImGui::TextColored(kGrey, "%s", applies);
         if (ImGui::Button(T("Aplicar recomendado", "Apply recommended"))) {
-            ApplyHwRecommended(rec);
+            ApplyHwRecommended(rec, temporal);
             a.notice = T("Ajustes recomendados aplicados.", "Recommended settings applied.");
         }
         ImGui::TextColored(kGrey, "%s",

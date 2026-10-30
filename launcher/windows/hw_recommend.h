@@ -40,6 +40,10 @@ inline bool IsRtxName(const std::string& gpu_name) {
 }
 
 // Never 0 (Unlimited): unknown panels (hz <= 0) read as 60.
+//
+// Intentionally not clamped to the launcher's kFpsLimits preset list: a sub-60 Hz panel
+// keeps its own rate (e.g. 50), and the game honors any integer (bbport_settings clamps
+// fps_limit to 0..1000); the combo only offers presets for the common cases.
 inline int RecommendedFpsLimit(int panel_hz) {
     const int hz = panel_hz <= 0 ? 60 : panel_hz;
     return hz < 60 ? hz : 60;
@@ -53,6 +57,14 @@ inline const char* RecommendedRenderRes(std::uint64_t vram_bytes) {
 
 inline const char* RecommendedTemporal(bool is_rtx, bool dlss_bridge_present) {
     return (is_rtx && dlss_bridge_present) ? "dlss" : "fsr1";
+}
+
+// The native renderer only runs FSR 1/off (its combo offers off/fsr1; FSR 3 and DLSS live
+// in shadPS4's rasterizer), so a DLSS pick is clamped to FSR 1 there. The Settings preview
+// and the apply path share this, so the advertised upscaler and the stored key agree.
+inline const char* ClampTemporalForRenderer(const char* temporal, bool is_native) {
+    if (is_native && std::string(temporal) == "dlss") return "fsr1";
+    return temporal;
 }
 
 struct Recommendation {

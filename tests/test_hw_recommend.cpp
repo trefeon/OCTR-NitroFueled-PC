@@ -13,6 +13,8 @@ int main() {
     assert(RecommendedFpsLimit(144) == 60);
     assert(RecommendedFpsLimit(165) == 60);
     assert(RecommendedFpsLimit(240) == 60);
+    // Sub-60 Hz panels keep their own rate (50, 30): the game honors any integer,
+    // the launcher's combo list is presets only.
     assert(RecommendedFpsLimit(50) == 50);
     assert(RecommendedFpsLimit(30) == 30);
     assert(RecommendedFpsLimit(0) == 60);
@@ -39,6 +41,13 @@ int main() {
     assert(std::string(RecommendedTemporal(true, false)) == "fsr1");
     assert(std::string(RecommendedTemporal(false, true)) == "fsr1");
     assert(std::string(RecommendedTemporal(false, false)) == "fsr1");
+
+    // Renderer clamp (shared by the preview and the apply path): native+DLSS advertises
+    // and stores FSR 1, never DLSS.
+    assert(std::string(ClampTemporalForRenderer("dlss", true)) == "fsr1");
+    assert(std::string(ClampTemporalForRenderer("dlss", false)) == "dlss");
+    assert(std::string(ClampTemporalForRenderer("fsr1", true)) == "fsr1");
+    assert(std::string(ClampTemporalForRenderer("fsr1", false)) == "fsr1");
 
     // The combined recommendation wires the three together.
     {
