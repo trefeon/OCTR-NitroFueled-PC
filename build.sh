@@ -21,7 +21,8 @@ MINGW*|MSYS*)
         fi
     done
     cmake -S gpu -B out/gpu-win -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO=off \
-        -DBB_LTO="${BB_LTO:-OFF}" -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ >/dev/null
+        -DBB_LTO="${BB_LTO:-OFF}" -DBB_TARGET_CPU="${BB_TARGET_CPU:-}" \
+        -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ >/dev/null
     echo "GPU library and loader: LTO ${BB_LTO:-OFF}"
     # CTR PKG import (Task 1): build the pinned pkg_extractor alongside the
     # loader when its submodule is checked out (see gpu/CMakeLists.txt; the
@@ -161,6 +162,8 @@ if [[ ${1:-} == --test ]]; then
     out/net-tunnel-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_net_ping.c src/runtime_net_ping.c -o out/net-ping-test
     out/net-ping-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_net_overrides.c src/runtime_net_overrides.c -o out/net-overrides-test
+    out/net-overrides-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc "${includes[@]}" tests/test_savedata_guest.c -o out/savedata-guest-test
     out/savedata-guest-test > /dev/null
     "$CC" -std=c11 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_http_ryunet.c src/runtime_http.c -o out/http-ryunet-test

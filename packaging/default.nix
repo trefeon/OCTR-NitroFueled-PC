@@ -25,7 +25,11 @@ let
       in builtins.elem rel wanted
         || lib.any (dir: lib.hasPrefix (dir + "/") rel) assetDirs;
   };
-  python = pkgs.python3.withPackages (ps: [ ps.pygobject3 ]);
+  icedX86 = import ./iced-x86.nix {
+    pythonPackages = pkgs.python3Packages;
+    fetchurl = pkgs.fetchurl;
+  };
+  python = pkgs.python3.withPackages (ps: [ ps.pygobject3 icedX86 ]);
   # Mesa's Vulkan drivers come with the package (RADV and ANV); bbport_vulkan.py adds the host
   # NVIDIA ICD and only its vendor libraries (matching the host's kernel module). Only the two
   # drivers, not the whole Mesa: its OpenGL drivers and LLVM were ~800 MB of the package. RADV
@@ -159,7 +163,7 @@ pkgs.stdenv.mkDerivation {
       "''${gappsWrapperArgs[@]}" \
       ${common}      --add-flags "$out/share/sacredfire/launcher/bbport_vulkan.py ${python}/bin/python3 $out/share/sacredfire/launcher/sacredfire_launcher.py" \
       --set BB_PREBUILT 1 \
-      --set PYTHON ${pkgs.python3}/bin/python3 \
+      --set PYTHON ${python}/bin/python3 \
       --set BB_DXC ${pkgs.directx-shader-compiler}/bin/dxc \
       --set BB_BUNDLED_VK_DRIVER_FILES ${icds} \
       --prefix PATH : ${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.util-linux pkgs.procps
@@ -169,7 +173,7 @@ pkgs.stdenv.mkDerivation {
     makeShellWrapper ${pkgs.python3}/bin/python3 $out/bin/sacredfire-game \
       ${common}      --add-flags "$out/share/sacredfire/launcher/bbport_vulkan.py ${pkgs.bash}/bin/bash $out/share/sacredfire/run.sh" \
       --set BB_PREBUILT 1 \
-      --set PYTHON ${pkgs.python3}/bin/python3 \
+      --set PYTHON ${python}/bin/python3 \
       --set BB_DXC ${pkgs.directx-shader-compiler}/bin/dxc \
       --set BB_BUNDLED_VK_DRIVER_FILES ${icds} \
       --prefix PATH : ${lib.makeBinPath [ pkgs.bash pkgs.coreutils pkgs.procps ]} \

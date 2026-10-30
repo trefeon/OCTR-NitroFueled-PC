@@ -58,10 +58,12 @@ covers is missing.
 
 ## Packaging
 
-The Python that runs `run.py` needs iced-x86 (`pip install iced-x86`; its wheels are cp38-abi3 and
-a wheel is a zip): `packaging/windows/make_portable.py` bundles it in the portable ZIP. The Linux
-AppImage does not carry it yet (iced-x86 is not in nixpkgs): there the rewrite logs why it is
-unavailable, which only affects CPUs that need it.
+The Python that runs `run.py` or the Linux launcher needs iced-x86 to generate the table. The
+Windows portable ZIP bundles it through `packaging/windows/make_portable.py`. Linux `shell.nix`
+and the AppImage Python environment both include the version-pinned, SHA-256-verified x86-64
+manylinux wheel declared in `packaging/iced-x86.nix`. Outside those Nix environments, a custom
+`PYTHON` must also provide `iced_x86`; if generation fails, the launcher omits `--isa-rewrite` and
+the probe visibly rejects a CPU missing a rewritable feature rather than starting unrewritten.
 
 ## Tested
 

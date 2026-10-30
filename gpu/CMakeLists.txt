@@ -2,6 +2,15 @@
 # drivers, adapted to the native_probe runtime through shims in shim/.
 cmake_minimum_required(VERSION 3.24)
 project(bbgpu LANGUAGES C CXX)
+set(BB_TARGET_CPU "" CACHE STRING "Target CPU for compiler code generation (empty keeps portable defaults)")
+if (BB_TARGET_CPU)
+    if (NOT BB_TARGET_CPU MATCHES "^[A-Za-z0-9][A-Za-z0-9_.+-]*$")
+        message(FATAL_ERROR "BB_TARGET_CPU must be a single compiler target token")
+    endif()
+    add_compile_options(
+        "$<$<COMPILE_LANGUAGE:C,CXX>:-march=${BB_TARGET_CPU}>"
+        "$<$<COMPILE_LANGUAGE:C,CXX>:-mtune=${BB_TARGET_CPU}>")
+endif()
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -19,8 +28,8 @@ endif()
 
 # bbport: link-time optimization (BB_LTO, default on) and profile-guided optimization
 # (BB_PGO: off, generate = instrumented build writing into BB_PGO_DIR, use = build with that
-# profile). Covers bbgpu and the static libraries linked into it. No -march: the same build
-# runs on the Steam Deck.
+# profile). Covers bbgpu and the static libraries linked into it. With BB_TARGET_CPU unset, the
+# portable build has no -march and also runs on the Steam Deck.
 option(BB_LTO "Link-time optimization of bbgpu" ON)
 set(BB_PGO "off" CACHE STRING "Profile-guided optimization: off, generate, use")
 set(BB_PGO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../pgo" CACHE PATH "Profile directory")
