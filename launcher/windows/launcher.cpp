@@ -792,6 +792,11 @@ struct App {
     // DLC tab.
     std::vector<DlcInfo> dlc;
     bool dlc_dirty = true;
+    // First-run install wizard (fresh folder without launcher.ini): blocks the normal tabs
+    // until Continue writes launcher.ini. setup_install_dir defaults to the launcher's own
+    // folder (portable behavior, zero migration risk).
+    bool setup_show = false;
+    fs::path setup_install_dir;
 };
 
 App g_app;
@@ -3115,6 +3120,85 @@ void PkgGuidePopup() {
     ImGui::Spacing();
     if (ImGui::Button(T("Cerrar", "Close"))) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
+}
+
+// ---------------------------------------------------------------------------------------------
+// First-run install wizard: shown only when no launcher.ini exists (a fresh folder). It
+// confirms the portable install folder (the launcher's own folder: zero migration risk),
+// ensures games/ (installs) and dlc/ (DLC raws) exist, writes launcher.ini on Continue and
+// lands on the Play tab hero card. Existing installs (launcher.ini present) never see it.
+// Escape is intentionally ignored on this screen: setup must not be skippable (closing the
+// window still quits).
+
+void SetupWizardConfirm() {
+    App& a = g_app;
+    const fs::path base = a.setup_install_dir.empty() ? a.root : a.setup_install_dir;
+    // games/ already ships in the ZIP (empty dir); ensure both folders when missing.
+    std::error_code ec;
+    fs::create_directories(base / L"games", ec);
+    const std::error_code games_error = ec;
+    ec.clear();
+    fs::create_directories(base / L"dlc", ec);
+    if (games_error || ec) {
+        a.notice = T("No se pudieron crear las carpetas games/ o dlc.",
+                     "Could not create the games/ or dlc/ folders.");
+    }
+    // The default keeps everything next to the launcher: pkg_library_dir stays empty
+    // (= <root>/games) and dlc_dir stays empty (= <root>/dlc). A custom folder persists
+    // both, and the install choice itself is recorded.
+    std::error_code eq;
+    bool portable = fs::equivalent(base, a.root, eq);
+    if (eq) portable = base.lexically_normal() == a.root.lexically_normal();
+    if (portable) {
+        a.pkg_library_dir.clear();
+        a.launcher.Set("pkg_library_dir", "");
+        a.launcher.Set("dlc_dir", "");
+    } else {
+        a.pkg_library_dir = base / L"games";
+        a.launcher.Set("pkg_library_dir", PathText(a.pkg_library_dir));
+        a.launcher.Set("dlc_dir", PathText(base / L"dlc"));
+    }
+    a.launcher.Set("install_dir", PathText(base));
+    SaveLauncher();
+    a.setup_show = false;
+    a.active_page = 0;  // land on the Play tab hero card
+}
+
+void SetupWizard() {
+    App& a = g_app;
+    const fs::path base = a.setup_install_dir.empty() ? a.root : a.setup_install_dir;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.025f, 0.19f, 0.40f, 0.78f));
+    ImGui::BeginChild("setup_body", ImVec2(0, 0), ImGuiChildFlags_None);
+    ImGui::SeparatorText(T("Bienvenido", "Welcome"));
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextUnformatted(T("Vamos a preparar tu instalación portable de CTR-NitroFueled-PC.",
+                             "Let's set up your portable CTR-NitroFueled-PC install."));
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    ImGui::SeparatorText(T("Carpeta de instalación", "Install folder"));
+    ImGui::TextColored(kGrey, "%s", PathText(base).c_str());
+    ImGui::SameLine();
+    if (ImGui::SmallButton(T("Cambiar...", "Change..."))) {
+        const std::wstring title = Widen(T("Carpeta de instalación", "Install folder"));
+        if (const auto sel = PickFolder(a.hwnd, title.c_str(), base)) a.setup_install_dir = *sel;
+    }
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(kGrey, "%s",
+                       T("Por defecto es la carpeta del launcher: todo queda junto, sin mover nada.",
+                         "By default it is the launcher's own folder: everything stays together, nothing is moved."));
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    ImGui::SeparatorText(T("Se creará", "What gets created"));
+    ImGui::BulletText("%s", T("games/: juegos instalados (biblioteca)",
+                              "games/: installed games (library)"));
+    ImGui::BulletText("%s", T("dlc/: DLC sin extraer (.pkg o carpetas)",
+                              "dlc/: unextracted DLC (.pkg files or folders)"));
+    ImGui::TextColored(kGrey, "%s", PathText(base / L"games").c_str());
+    ImGui::TextColored(kGrey, "%s", PathText(base / L"dlc").c_str());
+    ImGui::Spacing();
+    if (ImGui::Button(T("Continuar", "Continue"), ImVec2(220.0f, 0.0f))) SetupWizardConfirm();
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
 }
 
 bool PrimaryPlayButton(const char* label, ImVec2 size, bool disabled) {
@@ -7570,6 +7654,15 @@ void Frame() {
     }
     UpdateBanner();
 
+    // Fresh folder: the first-run wizard takes the whole content area instead of the tabs.
+    // Escape is ignored here on purpose (setup cannot be skipped); closing quits instead.
+    // Deferred popups (e.g. the settings-import offer) stay pending until after Continue.
+    if (a.setup_show) {
+        SetupWizard();
+        ImGui::End();  // close the "launcher" window opened above
+        return;
+    }
+
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.025f, 0.19f, 0.40f, 0.78f));
     ImGui::BeginChild("menu_body", ImVec2(0, 0), ImGuiChildFlags_None);
     const float menu_w = 238.0f;
@@ -7694,6 +7787,13 @@ void LoadState() {
     a.base_dir = TextPath(a.launcher.Get("base_dir"));
     a.update_dir = TextPath(a.launcher.Get("update_dir"));
     a.pkg_library_dir = TextPath(a.launcher.Get("pkg_library_dir"));
+    // Fresh folder (no launcher.ini): the first-run wizard confirms the portable install
+    // folder and creates games/ + dlc/ on Continue. Existing installs never see it.
+    if (new_folder) {
+        a.setup_show = true;
+        a.setup_install_dir = a.root;
+        a.active_page = 0;
+    }
     // First start of a portable package: a merged folder next to the launcher is picked up.
     if (a.game_dir.empty()) {
         for (const wchar_t* name : {L"CUSA14876-1.21", L"CUSA13795-1.21", L"CUSA14876", L"CUSA13795"}) {
