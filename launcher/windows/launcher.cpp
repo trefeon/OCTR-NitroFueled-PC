@@ -709,7 +709,7 @@ struct App {
     fs::path pkg_pending_src;   // empty = no pre-flight showing
     fs::path pkg_library_dir;   // empty = <launcher_root>/games
     struct PkgPreflight {
-        char kind = 'x';  // 'b' base, 'u' 1.21 update, 'd' DLC, 'x' invalid
+        char kind = 'x';  // 'b' base, 'u' 1.21 update, 'd' DLC, 'w' other-region DLC (warn), 'x' invalid
         std::string file, role, detail;
         bool ok = false;
     };
@@ -2718,8 +2718,7 @@ std::vector<App::PkgPreflight> ScanPkgFolder(const fs::path& dir) {
     for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
         std::error_code e2;
         if (!it->is_regular_file(e2)) continue;
-        const fs::path ext = it->path().extension();
-        if (ext != L".pkg" && ext != L".PKG") continue;
+        if (_wcsicmp(it->path().extension().c_str(), L".pkg") != 0) continue;
         App::PkgPreflight p;
         p.file = PathText(it->path().filename());
         std::string problem;
@@ -2733,7 +2732,7 @@ std::vector<App::PkgPreflight> ScanPkgFolder(const fs::path& dir) {
                 return f == sfo.end() ? std::string() : f->second;
             };
             const std::string title = get("TITLE_ID"), category = get("CATEGORY"), ver = get("APP_VER");
-            if (title != "CUSA13795") {
+            if (title != "CUSA13795" && category != "ac") {
                 p.role = T("no válido", "invalid");
                 p.detail = std::string(T("es otro juego o región: ", "another game or region: ")) +
                            (title.empty() ? "?" : title);
@@ -2744,20 +2743,31 @@ std::vector<App::PkgPreflight> ScanPkgFolder(const fs::path& dir) {
                 p.ok = true;
             } else if (category == "ac") {
                 const DlcInfo d = DescribeDlc(it->path());
-                if (d.ok) {
+                if (!d.ok) {
+                    p.role = T("no válido", "invalid");
+                    p.detail = d.problem;
+                } else if (title == "CUSA13795") {
                     p.kind = 'd';
                     p.role = T("DLC", "DLC");
                     p.detail = d.title;
                     p.ok = true;
                 } else {
-                    p.role = T("no válido", "invalid");
-                    p.detail = d.problem;
+                    // The other CTR region (CUSA14876): the importer runs but skips it,
+                    // so warn instead of failing the review.
+                    p.kind = 'w';
+                    p.role = T("DLC (se omitirá)", "DLC (will be skipped)");
+                    p.detail = d.title + std::string(T(": es de otra región, solo se copian DLC de CUSA13795",
+                                                       ": another region's DLC, only CUSA13795 DLC is copied"));
                 }
-            } else if (category == "gp" || ver == kUpdateVersion) {
+            } else if (category == "gp" && ver == kUpdateVersion) {
                 p.kind = 'u';
                 p.role = T("actualización 1.21", "1.21 update");
                 p.detail = get("TITLE");
                 p.ok = true;
+            } else if (category == "gp") {
+                p.role = T("no válido", "invalid");
+                p.detail = std::string(T("actualización ", "update ")) + (ver.empty() ? "?" : ver) +
+                           T(" (se necesita la 01.21)", " (01.21 is needed)");
             } else {
                 p.role = T("no válido", "invalid");
                 p.detail = std::string(T("no es base, actualización ni DLC (categoría ", "not base, update or DLC (category ")) +
@@ -2962,7 +2972,9 @@ void PlayTab() {
             fs::path start = TextPath(a.launcher.Get("pkg_dir"));
             std::error_code ec;
             if (!fs::is_directory(start, ec)) start = a.root;
-            if (const auto pkgs = PickFolder(a.hwnd, L"Carpeta con los .pkg de CUSA13795", start)) {
+            const std::wstring pkg_title =
+                Widen(T("Carpeta con los .pkg de CUSA13795", "Folder with the CUSA13795 .pkg files"));
+            if (const auto pkgs = PickFolder(a.hwnd, pkg_title.c_str(), start)) {
                 a.launcher.Set("pkg_dir", PathText(*pkgs));
                 SaveLauncher();
                 a.pkg_pending_src = *pkgs;
@@ -2980,8 +2992,11 @@ void PlayTab() {
         ImGui::TextColored(kGrey, "%s %s", T("Biblioteca:", "Library:"), PathText(pkg_library).c_str());
         ImGui::SameLine();
         if (ImGui::SmallButton(T("Cambiar...", "Change...")) && !busy && a.job != Job::PkgImport) {
-            if (const auto sel = PickFolder(a.hwnd, L"Biblioteca de juegos / Game library", pkg_library))
+            if (const auto sel = PickFolder(a.hwnd, L"Biblioteca de juegos / Game library", pkg_library)) {
                 a.pkg_library_dir = *sel;
+                a.launcher.Set("pkg_library_dir", PathText(*sel));
+                SaveLauncher();
+            }
         }
         if (a.job == Job::PkgImport) {
             ImGui::TextColored(kYellow, "%s", T("Importando PKGs...", "Importing PKGs..."));
@@ -3000,7 +3015,7 @@ void PlayTab() {
             for (const auto& p : a.pkg_preflight) {
                 if (p.kind == 'b') ++bases;
                 else if (p.kind == 'u') ++updates;
-                else if (p.kind != 'd') ++bad;
+                else if (p.kind != 'd' && p.kind != 'w') ++bad;
             }
             if (a.pkg_preflight.empty()) {
                 ImGui::TextColored(kRed, "%s",
@@ -3015,7 +3030,7 @@ void PlayTab() {
                         ImGui::TableNextColumn();
                         ImGui::TextUnformatted(p.file.c_str());
                         ImGui::TableNextColumn();
-                        ImGui::TextColored(p.ok ? kGreen : kRed, "%s", p.role.c_str());
+                        ImGui::TextColored(p.kind == 'w' ? kYellow : (p.ok ? kGreen : kRed), "%s", p.role.c_str());
                         ImGui::TableNextColumn();
                         ImGui::TextColored(kGrey, "%s", p.detail.c_str());
                     }
@@ -7278,6 +7293,7 @@ void LoadState() {
     a.game_dir = TextPath(a.launcher.Get("game_dir"));
     a.base_dir = TextPath(a.launcher.Get("base_dir"));
     a.update_dir = TextPath(a.launcher.Get("update_dir"));
+    a.pkg_library_dir = TextPath(a.launcher.Get("pkg_library_dir"));
     // First start of a portable package: a merged folder next to the launcher is picked up.
     if (a.game_dir.empty()) {
         for (const wchar_t* name : {L"CUSA14876-1.21", L"CUSA13795-1.21", L"CUSA14876", L"CUSA13795"}) {
