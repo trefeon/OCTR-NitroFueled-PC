@@ -153,8 +153,8 @@ existing defaults remain unchanged. Spanish and English.
 
 **Recommended for your hardware** (Windows launcher: Settings): detects the GPU name, dedicated
 VRAM and panel refresh, and one click applies the matched tier (resolution by VRAM, upscaler,
-Mailbox, async on). The FPS cap is `min(panel Hz, 60)`: the game was built for 60 with the 60 FPS
-patch, and above 60 the game logic itself speeds up.
+Mailbox, async on). The FPS cap is `min(panel Hz, 60)`: the game tick itself tops out at 60 with the 60 FPS
+patch, so uncapped present only redraws duplicate frames.
 
 ### Which game dumps work
 
