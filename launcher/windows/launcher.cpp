@@ -714,6 +714,16 @@ struct App {
         bool ok = false;
     };
     std::vector<PkgPreflight> pkg_preflight;
+    // Background PKG pre-flight scan: the picker stays responsive while the worker classifies.
+    // pkg_pending_src is set at scan start (so the review area shows progress); pkg_preflight
+    // is published only when the scan finishes. The worker only reads PKGs; cancelling drops
+    // its partial work, so abandoning the scan has no side effects.
+    std::thread pkg_scan_worker;
+    std::atomic<bool> pkg_scanning{false};
+    std::atomic<bool> pkg_scan_finished{false};
+    std::atomic<bool> pkg_scan_cancel{false};
+    std::atomic<size_t> pkg_scan_done{0}, pkg_scan_total{0};
+    std::vector<PkgPreflight> pkg_scan_result;  // worker -> UI handoff, guarded by mutex
     bool pkg_show_guide = false;
     std::atomic<size_t> merge_done{0}, merge_total{0};
     std::atomic<bool> job_finished{false};
@@ -1565,6 +1575,7 @@ void StartMerge(std::vector<fs::path> sources) {
 
 fs::path DlcRoot();  // the configured DLC folder (defined with the DLC tab)
 bool UpdateBusy();     // whether the updater is working (defined with the updater tab)
+void PollPkgScan();    // background PKG pre-flight scan (defined with ScanPkgFolder)
 
 /// A PKG folder (one CUSA13795 base, one 1.21 update, optional matching DLC) -> a new validated
 /// install, via scripts/pkg_import.py as a child process with streamed output. Cancellation
@@ -1573,7 +1584,7 @@ bool UpdateBusy();     // whether the updater is working (defined with the updat
 /// merged directory only after game_check.py accepts it.
 void StartPkgImport(const fs::path& pkg_dir, const fs::path& dest_dir) {
     App& a = g_app;
-    if (!a.python || a.job != Job::None || UpdateBusy()) return;
+    if (!a.python || a.job != Job::None || a.pkg_scanning || UpdateBusy()) return;
     JoinWorker();
     a.job = Job::PkgImport;
     a.job_finished = false;
@@ -2115,6 +2126,7 @@ void PollJobs() {
         PressPlay();
     }
     if (a.probe_done && a.probe.joinable()) a.probe.join();
+    PollPkgScan();
     if (!a.job_finished) return;
     const Job finished = a.job.exchange(Job::None);
     a.job_finished = false;
@@ -2709,75 +2721,176 @@ void DrawMenuIcon(ImDrawList* d, int id, ImVec2 c, ImU32 ink, float s);
 std::map<std::string, std::string> ReadPkgSfo(const fs::path& pkg, std::string& error);
 DlcInfo DescribeDlc(const fs::path& path);
 
-/// Every top-level *.pkg with the role the importer will give it (base / 1.21 update / DLC),
-/// reusing ReadPkgSfo/DescribeDlc. Anything else carries the reason it would fail, so the
-/// inline confirm can block Import before the engine (Job::PkgImport) ever starts.
-std::vector<App::PkgPreflight> ScanPkgFolder(const fs::path& dir) {
-    std::vector<App::PkgPreflight> out;
+/// One file's half of ScanPkgFolder: the role the importer will give a single PKG
+/// (base / 1.21 update / DLC), reusing ReadPkgSfo/DescribeDlc. Anything else carries the
+/// reason it would fail, so the inline confirm can block Import before the engine
+/// (Job::PkgImport) ever starts. Runs on the scan worker; role strings follow the locale
+/// active when the scan started (the language is only ever changed from the UI thread).
+App::PkgPreflight ClassifyPkgFile(const fs::path& pkg_path) {
+    App::PkgPreflight p;
+    p.file = PathText(pkg_path.filename());
+    std::string problem;
+    const auto sfo = ReadPkgSfo(pkg_path, problem);
+    if (!problem.empty()) {
+        p.role = T("no válido", "invalid");
+        p.detail = problem;
+    } else {
+        auto get = [&](const char* k) {
+            const auto f = sfo.find(k);
+            return f == sfo.end() ? std::string() : f->second;
+        };
+        const std::string title = get("TITLE_ID"), category = get("CATEGORY"), ver = get("APP_VER");
+        if (title != "CUSA13795" && category != "ac") {
+            p.role = T("no válido", "invalid");
+            p.detail = std::string(T("es otro juego o región: ", "another game or region: ")) +
+                       (title.empty() ? "?" : title);
+        } else if (category == "gd") {
+            p.kind = 'b';
+            p.role = T("juego base", "base game");
+            p.detail = get("TITLE");
+            p.ok = true;
+        } else if (category == "ac") {
+            const DlcInfo d = DescribeDlc(pkg_path);
+            if (!d.ok) {
+                p.role = T("no válido", "invalid");
+                p.detail = d.problem;
+            } else if (title == "CUSA13795") {
+                p.kind = 'd';
+                p.role = T("DLC", "DLC");
+                p.detail = d.title;
+                p.ok = true;
+            } else {
+                // The other CTR region (CUSA14876): the importer runs but skips it,
+                // so warn instead of failing the review.
+                p.kind = 'w';
+                p.role = T("DLC (se omitirá)", "DLC (will be skipped)");
+                p.detail = d.title + std::string(T(": es de otra región, solo se copian DLC de CUSA13795",
+                                                   ": another region's DLC, only CUSA13795 DLC is copied"));
+            }
+        } else if (category == "gp" && ver == kUpdateVersion) {
+            p.kind = 'u';
+            p.role = T("actualización 1.21", "1.21 update");
+            p.detail = get("TITLE");
+            p.ok = true;
+        } else if (category == "gp") {
+            p.role = T("no válido", "invalid");
+            p.detail = std::string(T("actualización ", "update ")) + (ver.empty() ? "?" : ver) +
+                       T(" (se necesita la 01.21)", " (01.21 is needed)");
+        } else {
+            p.role = T("no válido", "invalid");
+            p.detail = std::string(T("no es base, actualización ni DLC (categoría ", "not base, update or DLC (category ")) +
+                       (category.empty() ? "?" : category) + ")";
+        }
+    }
+    return p;
+}
+
+/// The top-level *.pkg files of a folder: the scan's work list, counted up front so the
+/// progress row can show N of M. Same enumeration ScanPkgFolder always used.
+std::vector<fs::path> ListPkgFiles(const fs::path& dir) {
+    std::vector<fs::path> out;
     std::error_code ec;
     for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
         std::error_code e2;
         if (!it->is_regular_file(e2)) continue;
         if (_wcsicmp(it->path().extension().c_str(), L".pkg") != 0) continue;
-        App::PkgPreflight p;
-        p.file = PathText(it->path().filename());
-        std::string problem;
-        const auto sfo = ReadPkgSfo(it->path(), problem);
-        if (!problem.empty()) {
-            p.role = T("no válido", "invalid");
-            p.detail = problem;
-        } else {
-            auto get = [&](const char* k) {
-                const auto f = sfo.find(k);
-                return f == sfo.end() ? std::string() : f->second;
-            };
-            const std::string title = get("TITLE_ID"), category = get("CATEGORY"), ver = get("APP_VER");
-            if (title != "CUSA13795" && category != "ac") {
-                p.role = T("no válido", "invalid");
-                p.detail = std::string(T("es otro juego o región: ", "another game or region: ")) +
-                           (title.empty() ? "?" : title);
-            } else if (category == "gd") {
-                p.kind = 'b';
-                p.role = T("juego base", "base game");
-                p.detail = get("TITLE");
-                p.ok = true;
-            } else if (category == "ac") {
-                const DlcInfo d = DescribeDlc(it->path());
-                if (!d.ok) {
-                    p.role = T("no válido", "invalid");
-                    p.detail = d.problem;
-                } else if (title == "CUSA13795") {
-                    p.kind = 'd';
-                    p.role = T("DLC", "DLC");
-                    p.detail = d.title;
-                    p.ok = true;
-                } else {
-                    // The other CTR region (CUSA14876): the importer runs but skips it,
-                    // so warn instead of failing the review.
-                    p.kind = 'w';
-                    p.role = T("DLC (se omitirá)", "DLC (will be skipped)");
-                    p.detail = d.title + std::string(T(": es de otra región, solo se copian DLC de CUSA13795",
-                                                       ": another region's DLC, only CUSA13795 DLC is copied"));
-                }
-            } else if (category == "gp" && ver == kUpdateVersion) {
-                p.kind = 'u';
-                p.role = T("actualización 1.21", "1.21 update");
-                p.detail = get("TITLE");
-                p.ok = true;
-            } else if (category == "gp") {
-                p.role = T("no válido", "invalid");
-                p.detail = std::string(T("actualización ", "update ")) + (ver.empty() ? "?" : ver) +
-                           T(" (se necesita la 01.21)", " (01.21 is needed)");
-            } else {
-                p.role = T("no válido", "invalid");
-                p.detail = std::string(T("no es base, actualización ni DLC (categoría ", "not base, update or DLC (category ")) +
-                           (category.empty() ? "?" : category) + ")";
-            }
-        }
-        out.push_back(std::move(p));
+        out.push_back(it->path());
     }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+/// Every top-level *.pkg with the role the importer will give it (base / 1.21 update / DLC),
+/// reusing ReadPkgSfo/DescribeDlc. Anything else carries the reason it would fail, so the
+/// inline confirm can block Import before the engine (Job::PkgImport) ever starts.
+std::vector<App::PkgPreflight> ScanPkgFolder(const fs::path& dir) {
+    std::vector<App::PkgPreflight> out;
+    for (const auto& path : ListPkgFiles(dir)) out.push_back(ClassifyPkgFile(path));
     std::sort(out.begin(), out.end(), [](const auto& x, const auto& y) { return x.file < y.file; });
     return out;
+}
+
+void JoinPkgScan() {
+    if (g_app.pkg_scan_worker.joinable()) g_app.pkg_scan_worker.join();
+}
+
+/// A picked PKG folder, classified off the UI thread: the launcher stays responsive with a
+/// 'Scanning PKGs... N of M' progress row, and Cancel abandons the scan with no side effects
+/// (the worker only reads; nothing is published until the last file, with the same roles,
+/// gating and pre-flight table as the synchronous ScanPkgFolder above).
+void StartPkgScan(const fs::path& dir) {
+    App& a = g_app;
+    if (a.pkg_scanning) {  // a re-pick mid-scan: drop the stale scan first
+        a.pkg_scan_cancel = true;
+        JoinPkgScan();
+        a.pkg_scanning = false;
+        a.pkg_scan_finished = false;
+        a.pkg_scan_cancel = false;
+    }
+    a.pkg_pending_src = dir;
+    a.pkg_preflight.clear();
+    {
+        std::scoped_lock lock{a.mutex};
+        a.pkg_scan_result.clear();
+    }
+    const std::vector<fs::path> files = ListPkgFiles(dir);
+    a.pkg_scan_done = 0;
+    a.pkg_scan_total = files.size();
+    a.pkg_scan_cancel = false;
+    a.pkg_scan_finished = false;
+    a.pkg_scanning = true;
+    a.pkg_scan_worker = std::thread([files] {
+        App& app = g_app;
+        std::vector<App::PkgPreflight> local;
+        local.reserve(files.size());
+        for (const auto& path : files) {
+            if (app.pkg_scan_cancel) break;
+            local.push_back(ClassifyPkgFile(path));
+            ++app.pkg_scan_done;
+        }
+        if (!app.pkg_scan_cancel) {
+            std::sort(local.begin(), local.end(),
+                      [](const auto& x, const auto& y) { return x.file < y.file; });
+            std::scoped_lock lock{app.mutex};
+            app.pkg_scan_result = std::move(local);
+        }
+        // Set in both cases: a cancelled scan still needs PollPkgScan to join and clean up.
+        app.pkg_scan_finished = true;
+    });
+}
+
+/// Cancel the in-flight scan, if any: the worker drops its partial work and publishes nothing,
+/// and PollPkgScan then clears the pending folder. Never blocks; the join happens there.
+void RequestPkgScanCancel() {
+    App& a = g_app;
+    if (!a.pkg_scanning) return;
+    a.pkg_scan_cancel = true;
+}
+
+/// UI-thread half of the scan: picks up the finished worker and either publishes its table or,
+/// when cancelled, drops it and clears the pending folder. Called every frame from PollJobs;
+/// the join never blocks (the worker already exited).
+void PollPkgScan() {
+    App& a = g_app;
+    if (!a.pkg_scanning || !a.pkg_scan_finished) return;
+    JoinPkgScan();
+    std::vector<App::PkgPreflight> result;
+    {
+        std::scoped_lock lock{a.mutex};
+        result = std::move(a.pkg_scan_result);
+    }
+    a.pkg_scanning = false;
+    a.pkg_scan_finished = false;
+    if (a.pkg_scan_cancel) {
+        a.pkg_scan_cancel = false;
+        a.pkg_pending_src.clear();
+        a.pkg_preflight.clear();
+    } else {
+        a.pkg_preflight = std::move(result);
+        // An empty folder scans fine: pkg_pending_src stays so the review shows 'no .pkg files'.
+    }
+    a.pkg_scan_done = 0;
+    a.pkg_scan_total = 0;
 }
 
 /// 'How to prepare your PKG files': what to download, what is not needed, what the importer
@@ -2886,11 +2999,14 @@ void PlayTab() {
                                          "Python 3 is missing: no python\\python.exe and no installed Python."));
     }
     // Escape backs out of the PKG flow step by step: a running import first (same as its
-    // Cancel button), else the pending review (same as its Cancel). Never fires with a popup
-    // open (the guide handles its own Escape) or outside these two exact states.
+    // Cancel button), else a running scan (same as its Cancel: abandoned with no side effects),
+    // else the pending review (same as its Cancel). Never fires with a popup
+    // open (the guide handles its own Escape) or outside these three exact states.
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup)) {
         if (a.job == Job::PkgImport) {
             StopPkgImport();
+        } else if (a.pkg_scanning) {
+            RequestPkgScanCancel();
         } else if (!a.pkg_pending_src.empty()) {
             a.pkg_pending_src.clear();
             a.pkg_preflight.clear();
@@ -2983,7 +3099,7 @@ void PlayTab() {
                                  "Choose the folder with your PKGs: they are scanned, extracted to a temporary "
                                  "folder, validated and installed into the library; DLC is copied without extracting."));
         ImGui::PopTextWrapPos();
-        ImGui::BeginDisabled(busy || !a.python);
+        ImGui::BeginDisabled(busy || !a.python || a.pkg_scanning);
         if (ImGui::Button(T("Importar carpeta de PKGs...", "Import PKG folder..."))) {
             fs::path start = TextPath(a.launcher.Get("pkg_dir"));
             std::error_code ec;
@@ -2993,8 +3109,7 @@ void PlayTab() {
             if (const auto pkgs = PickFolder(a.hwnd, pkg_title.c_str(), start)) {
                 a.launcher.Set("pkg_dir", PathText(*pkgs));
                 SaveLauncher();
-                a.pkg_pending_src = *pkgs;
-                a.pkg_preflight = ScanPkgFolder(*pkgs);
+                StartPkgScan(*pkgs);
             }
         }
         ImGui::EndDisabled();
@@ -3023,6 +3138,19 @@ void PlayTab() {
             }
             if (!last.empty()) ImGui::TextColored(kGrey, "%s", last.c_str());
             if (ImGui::Button(T("Cancelar", "Cancel"))) StopPkgImport();
+        } else if (a.pkg_scanning) {
+            ImGui::Spacing();
+            ImGui::SeparatorText(T("Revisar antes de importar", "Review before importing"));
+            ImGui::TextColored(kGrey, "%s", PathText(a.pkg_pending_src).c_str());
+            const size_t total = a.pkg_scan_total, done = a.pkg_scan_done;
+            char status[128];
+            std::snprintf(status, sizeof status,
+                           T("Revisando PKGs... %zu de %zu", "Scanning PKGs... %zu of %zu"), done, total);
+            ImGui::TextColored(kYellow, "%s", status);
+            char overlay[64];
+            std::snprintf(overlay, sizeof overlay, "%zu / %zu", done, total);
+            ImGui::ProgressBar(total ? float(done) / float(total) : 0.0f, ImVec2(-FLT_MIN, 0), overlay);
+            if (ImGui::Button(T("Cancelar", "Cancel"))) RequestPkgScanCancel();
         } else if (!a.pkg_pending_src.empty()) {
             ImGui::Spacing();
             ImGui::SeparatorText(T("Revisar antes de importar", "Review before importing"));
@@ -7753,6 +7881,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         g_update.worker.join();
     }
     // Background work finishes on its own; a running game keeps running.
+    // An in-flight PKG scan is abandoned: it only reads, and its partial work is dropped.
+    if (g_app.pkg_scanning) g_app.pkg_scan_cancel = true;
+    if (g_app.pkg_scan_worker.joinable()) g_app.pkg_scan_worker.join();
     if (g_app.job == Job::PkgImport) {
         if (g_app.pkg_import_job) TerminateJobObject(g_app.pkg_import_job, 1);
         else if (g_app.pkg_import_process) TerminateProcess(g_app.pkg_import_process, 1);
