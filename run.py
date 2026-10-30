@@ -41,13 +41,11 @@ import button_prompts  # noqa: E402
 import speed_mode  # noqa: E402
 import item_rules  # noqa: E402
 import online_mode  # noqa: E402
-import perf_report  # noqa: E402
 import native_shaders  # noqa: E402
 import widescreen  # noqa: E402
 sys.path.pop(0)
 
 LOG = None  # last_run.log (or BB_SAVE_LOG's file): everything this launch prints
-PERF = None  # the performance diagnostic's collector (scripts/perf_report.py), fed the game's lines
 # Vulkan's start-up, from the game's lines: when its window opened, whether the GPU was opened
 # ("GPU: <name>, <n> MiB VRAM"), the layers installed. A player's game sat on a black window between
 # the two (an overlay's Vulkan layer or a driver hanging): see watch_vulkan_start.
@@ -103,11 +101,6 @@ def emit(text):
         try:
             LOG.write(text)
             LOG.flush()
-        except Exception:
-            pass
-    if PERF:
-        try:
-            PERF.feed(text)
         except Exception:
             pass
     for line in text.splitlines():
@@ -428,7 +421,7 @@ def server_settings(host, port):
     return settings if isinstance(settings, dict) else {}
 
 
-RELEASES_API = 'https://api.github.com/repos/Ryu7w7/OCTR-NitroFueled-PC/releases/latest'
+RELEASES_API = 'https://api.github.com/repos/trefeon/OCTR-NitroFueled-PC/releases/latest'
 
 
 def parse_version(text):
@@ -563,11 +556,6 @@ def setup_online(env, config, data):
         "stun.eu.demonware.net": host,
         "stun.jp.demonware.net": host,
         "stun.au.demonware.net": host,
-        # Telemetry / CDN hosts the game contacts directly over HTTPS: keep
-        # them local (the server answers 404, which the game tolerates) and
-        # never touch the real servers.
-        "pipes-prod-glutton.public.aws.demonware.net": f"http://{host}:{auth_port}",
-        "objectstore.prod.demonware.net": f"http://{host}:{auth_port}",
         # Demonware friends API (eboot rodata ~0x1bef504, base http://friends.dev...):
         # list / invitation / pending / pair. Routed to the server's friends
         # handler; without this the game gets EHOSTUNREACH and shows no friends.
@@ -595,38 +583,6 @@ def setup_online(env, config, data):
         rules_file.write_text(json.dumps(items, sort_keys=True), encoding='utf-8')
         env['BB_ITEM_RULES'] = str(rules_file)
         say(f'Item rules from the server: {items.get("name") or "custom"}')
-
-
-def finish_perf_report(env, config, data, version, title_id, code):
-    """The anonymous performance report of this launch: kept beside the logs (perf/), sent to the
-    RyuNET server only when the player said yes (bbport.ini perf_reports=1, asked once by the
-    launcher). Never stops anything: a failure is one line in the log."""
-    if not PERF:
-        return
-    try:
-        report = PERF.report({
-            'octr': version[:40],
-            'edition': title_id,
-            'renderer': 'native' if env.get('BB_VK_NATIVE_ONLY') == '1' else 'shadps4',
-            'online': env.get('BB_ONLINE') == '1',
-            'settings': perf_report.settings_of(config),
-            'exit': {'code': code, 'meaning': perf_report.exit_meaning(code)},
-        })
-        if not report.get('overall'):
-            return  # nothing was drawn (a start that stopped early): nothing to say
-        path = perf_report.keep(report, data / 'perf')
-        if perf_report.consent(config) != '1':
-            return
-        host = env.get('BB_ONLINE_SERVER') or perf_report.settings_value(config, 'online_server') or 'octr.ryu7w7.xyz'
-        port = env.get('BB_ONLINE_HTTP_PORT', '8080')
-        if ':' in host and not host.startswith('['):
-            host, _, p = host.partition(':')
-            port = p if p.isdigit() else port
-        ryunet_json(host, port, '/ryunet/perf', 4, method='POST',
-                    body=json.dumps(report, separators=(',', ':')).encode())
-        say(f'Performance report sent (anonymous; a copy: {path.name} in perf/)')
-    except Exception as error:  # no network, an old server: the report stays local
-        say(f'Performance report not sent ({type(error).__name__}); a copy stays in perf/')
 
 
 def watch_vulkan_start(process, env):
@@ -665,6 +621,21 @@ def pump(stream):
         emit(raw.decode('utf-8', errors='replace').replace('\r\n', '\n'))
 
 
+def configure_game_language(env, config, launcher_ini=PORT / 'launcher.ini'):
+    """Use the game config, then the GUI's saved language when no environment override exists."""
+    if 'BB_LANGUAGE' in env:
+        return
+    for path in (Path(config), Path(launcher_ini)):
+        try:
+            for line in path.read_text(encoding='utf-8', errors='replace').splitlines():
+                key, _, value = line.partition('=')
+                if key.strip() in ('game_language', 'language') and value.strip():
+                    env['BB_LANGUAGE'] = value.strip()
+                    return
+        except OSError:
+            pass
+
+
 def main():
     args = sys.argv[1:]
     restarted = len(args) >= 2 and args[0] == '--after'
@@ -676,6 +647,14 @@ def main():
     data = Path(env.get('BB_DATA_DIR', PORT))
     out = data / 'out'
     out.mkdir(parents=True, exist_ok=True)
+    perf_dir = data / 'perf'
+    if perf_dir.is_symlink():
+        perf_dir.unlink()
+    elif perf_dir.is_dir():
+        shutil.rmtree(perf_dir)
+    for stale_state in out.glob('perf-state.*'):
+        if stale_state.is_file() or stale_state.is_symlink():
+            stale_state.unlink()
     env.setdefault('BB_CONFIG', str(data / 'bbport.ini'))
     config = env['BB_CONFIG']
     # A portable package ships bbport.default.ini, so a new version unzipped over an old one keeps
@@ -683,15 +662,7 @@ def main():
     if not Path(config).exists() and (PORT / 'bbport.default.ini').is_file():
         shutil.copyfile(PORT / 'bbport.default.ini', config)
 
-    if 'BB_LANGUAGE' not in env:
-        try:
-            for l in Path(config).read_text(encoding='utf-8', errors='replace').splitlines():
-                k, _, v = l.partition('=')
-                if k.strip() in ('game_language', 'language') and v.strip():
-                    env['BB_LANGUAGE'] = v.strip()
-                    break
-        except OSError:
-            pass
+    configure_game_language(env, config)
 
     if 'BB_ASYNC_SUBMIT' not in env:
         v = ini_value(config, 'async_submit')
@@ -954,8 +925,6 @@ def main():
                    '--app0', str(game), '--user', str(user_dir),
                    '--timeout', env.get('BB_TIMEOUT', '0'), *isa_args, *args]
         first = True
-        global PERF
-        PERF = perf_report.Collector()
         while True:
             if not first:  # the in-game menu may have changed render_res
                 settings, layout_patches = apply_layout()
@@ -1010,7 +979,6 @@ def main():
                 continue
             if code != RESTART_CODE:
                 say(f'--- the game ended with code {code}')
-                finish_perf_report(env, config, data, version, title_id, code)
                 if code == UNSUPPORTED_GPU_CODE:
                     say('--- This GPU or its driver lacks what the game needs from Vulkan (version 1.3 and '
                         'sparse buffers; the STOP line above says which). Update the graphics driver; if it '
