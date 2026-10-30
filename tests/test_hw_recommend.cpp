@@ -20,6 +20,14 @@ int main() {
     assert(RecommendedFpsLimit(0) == 60);
     assert(RecommendedFpsLimit(-1) == 60);
 
+    // Low-tier fps cap: half the panel rate, capped at 30; unknown panels read as 30.
+    assert(RecommendedLowFpsLimit(60) == 30);
+    assert(RecommendedLowFpsLimit(144) == 30);
+    assert(RecommendedLowFpsLimit(165) == 30);
+    assert(RecommendedLowFpsLimit(50) == 25);
+    assert(RecommendedLowFpsLimit(0) == 30);
+    assert(RecommendedLowFpsLimit(-1) == 30);
+
     // VRAM tiers: <4 GiB -> 720p, 4-8 GiB -> 1080p, >8 GiB -> 1440p.
     assert(std::string(RecommendedRenderRes(0)) == "720");
     assert(std::string(RecommendedRenderRes(3 * kGiB)) == "720");
@@ -51,20 +59,37 @@ int main() {
 
     // The combined recommendation wires the three together.
     {
-        const Recommendation r = RecommendForHardware(8 * kGiB, 165, true, true);
+        const Recommendation r = RecommendForHardware(8 * kGiB, 165, true, true, false);
         assert(r.fps_limit == 60 && std::string(r.render_res) == "1080" &&
-               std::string(r.temporal) == "dlss");
+               std::string(r.temporal) == "dlss" && !r.low_power);
     }
     {
-        // Unknown GPU/VRAM/panel: the safe end (720p, 60 FPS, FSR 1).
-        const Recommendation r = RecommendForHardware(0, 0, false, false);
-        assert(r.fps_limit == 60 && std::string(r.render_res) == "720" &&
-               std::string(r.temporal) == "fsr1");
+        // Unknown GPU/VRAM/panel: the safe end (720p, 30 FPS, FSR 1).
+        const Recommendation r = RecommendForHardware(0, 0, false, false, false);
+        assert(r.fps_limit == 30 && std::string(r.render_res) == "720" &&
+               std::string(r.temporal) == "fsr1" && r.low_power);
     }
     {
-        const Recommendation r = RecommendForHardware(12 * kGiB, 60, false, true);
+        const Recommendation r = RecommendForHardware(12 * kGiB, 60, false, true, false);
         assert(r.fps_limit == 60 && std::string(r.render_res) == "1440" &&
-               std::string(r.temporal) == "fsr1");
+               std::string(r.temporal) == "fsr1" && !r.low_power);
+    }
+    {
+        // Integrated GPU with plenty of (shared) VRAM still takes the low tier: 720p and
+        // half the panel rate, never the VRAM tier above.
+        const Recommendation r = RecommendForHardware(16 * kGiB, 60, false, false, true);
+        assert(r.fps_limit == 30 && std::string(r.render_res) == "720" &&
+               std::string(r.temporal) == "fsr1" && r.low_power);
+    }
+    {
+        // Integrated GPU on a high-refresh panel: half rate capped at 30.
+        const Recommendation r = RecommendForHardware(16 * kGiB, 144, false, false, true);
+        assert(r.fps_limit == 30 && r.low_power);
+    }
+    {
+        // Discrete GPU under 4 GiB VRAM: the low tier too (720p), same fps rule.
+        const Recommendation r = RecommendForHardware(2 * kGiB, 60, false, false, false);
+        assert(r.fps_limit == 30 && std::string(r.render_res) == "720" && r.low_power);
     }
 
     std::puts("PASS: hardware recommendation tiers");

@@ -172,5 +172,86 @@ class ResolveTests(unittest.TestCase):
         self.assertNotIn("BB_GPU_ID", env)
 
 
+class TierTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls.launcher, cls._modules_before = import_launcher()
+        except Exception as error:
+            raise unittest.SkipTest(f"launcher imports need more stubbing: {error}")
+
+    @classmethod
+    def tearDownClass(cls):
+        for key in [key for key in sys.modules if key not in cls._modules_before]:
+            del sys.modules[key]
+        if str(ROOT / "launcher") in sys.path:
+            sys.path.remove(str(ROOT / "launcher"))
+
+    def test_low_fps_is_half_panel_capped_at_30(self):
+        low = self.launcher.recommended_low_fps_limit
+        self.assertEqual(low(60), 30)
+        self.assertEqual(low(144), 30)
+        self.assertEqual(low(50), 25)
+        self.assertEqual(low(0), 30)
+
+    def test_discrete_tiers_unchanged(self):
+        rec = self.launcher.recommend_for_hardware(8 * (1 << 30), 165, True, True, False)
+        self.assertEqual(rec, {"fps_limit": 60, "render_res": "1080", "temporal": "dlss",
+                               "low_power": False})
+        rec = self.launcher.recommend_for_hardware(12 * (1 << 30), 60, False, True, False)
+        self.assertEqual((rec["fps_limit"], rec["render_res"], rec["low_power"]), (60, "1440", False))
+
+    def test_integrated_takes_low_tier_despite_shared_vram(self):
+        rec = self.launcher.recommend_for_hardware(16 * (1 << 30), 60, False, False, True)
+        self.assertEqual(rec, {"fps_limit": 30, "render_res": "720", "temporal": "fsr1",
+                               "low_power": True})
+
+    def test_small_discrete_vram_takes_low_tier(self):
+        rec = self.launcher.recommend_for_hardware(2 * (1 << 30), 60, False, False, False)
+        self.assertEqual((rec["fps_limit"], rec["render_res"], rec["low_power"]), (30, "720", True))
+
+    def test_unknown_hardware_is_safe_end(self):
+        rec = self.launcher.recommend_for_hardware(0, 0, False, False, False)
+        self.assertEqual((rec["fps_limit"], rec["render_res"], rec["low_power"]), (30, "720", True))
+
+    def test_effective_gpu(self):
+        launcher = self.launcher
+        devices = launcher.parse_gpu_devices(SAMPLE)
+        self.assertEqual(launcher.effective_gpu(RTX, devices)["index"], 2)  # explicit choice
+        self.assertIsNone(launcher.effective_gpu("0x10de:No Such GPU", devices))  # stale
+        self.assertEqual(launcher.effective_gpu("", devices)["index"], 2)  # Auto: first discrete
+        self.assertIsNone(launcher.effective_gpu("", []))
+
+    def test_intel_integrated_detection(self):
+        launcher = self.launcher
+        devices = {d["identity"]: d for d in launcher.parse_gpu_devices(SAMPLE)}
+        self.assertTrue(launcher.is_intel_integrated(devices["0x8086:Intel(R) UHD Graphics"]))
+        self.assertFalse(launcher.is_intel_integrated(devices[RTX]))
+        self.assertFalse(launcher.is_intel_integrated(None))
+
+    def test_low_preset_fills_absent_keys_only(self):
+        launcher = self.launcher
+        values, lines = {"show_fps": "0"}, ["show_fps=0"]
+        touched = launcher.low_preset_fill(values, lines)
+        self.assertEqual(sorted(touched), ["async_pipelines", "async_submit", "fps_limit",
+                                           "render_res", "temporal"])
+        self.assertEqual((values["render_res"], values["temporal"], values["fps_limit"]),
+                         ("720", "fsr1", "30"))
+
+    def test_low_preset_respects_explicit_choices(self):
+        launcher = self.launcher
+        values = {"render_res": "1080", "temporal": "off", "fps_limit": "60"}
+        lines = ["render_res=1080", "temporal=off", "fps_limit=60"]
+        self.assertEqual(launcher.low_preset_fill(values, lines), ["async_pipelines", "async_submit"])
+        self.assertEqual(values["temporal"], "off")
+
+    def test_low_preset_respects_legacy_fsr3(self):
+        launcher = self.launcher
+        values, lines = {"fsr3": "1"}, ["fsr3=1"]
+        touched = launcher.low_preset_fill(values, lines)
+        self.assertNotIn("temporal", touched)
+        self.assertNotIn("temporal", values)
+
+
 if __name__ == "__main__":
     unittest.main()

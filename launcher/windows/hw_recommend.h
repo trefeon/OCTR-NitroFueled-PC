@@ -23,12 +23,17 @@ namespace HwRecommend {
 //   (base path, as the game shipped), >8 GiB -> 1440p (the Pro's own scale).
 //   Native 4K (2160p) is never picked automatically: it needs the larger GPU heap
 //   patch and scales past what mid GPUs hold. 1620p is left for manual choice.
+// - low-power tier (integrated GPUs, <4 GiB VRAM, or unknown hardware): 720p, FSR 1
+//   (no temporal-reconstruction cost), half the panel rate capped at 30 FPS, async on.
+//   Integrated graphics share system memory and stall on large targets; the iGPU boot crash
+//   itself (igvk64 null deref on OEM-locked Intel drivers) is not fixable here, so the tier
+//   keeps the load known-good instead. Discrete GPUs with >= 4 GiB keep the tiers above.
 // - temporal: DLSS only on an RTX card with the DLSS bridge present
 //   (bin/sacredfire_dlss.dll + bin/nvngx_dlss.dll, dlss_bridge/); otherwise FSR 1,
 //   which runs on every GPU including the native renderer (FSR 3/DLSS do not).
 // - async_pipelines/async_submit on (bbport defaults, run.py forwards async_submit
 //   to BB_ASYNC_SUBMIT); present_mode Mailbox (lowest latency vsync'd mode).
-// Unknown hardware falls back to the safe end: vram 0 -> 720p, hz <= 0 -> 60.
+// Unknown hardware falls back to the safe end: vram 0 -> 720p, hz <= 0 -> 30 FPS.
 
 constexpr std::uint64_t kGiB = std::uint64_t{1} << 30;
 
@@ -47,6 +52,14 @@ inline bool IsRtxName(const std::string& gpu_name) {
 inline int RecommendedFpsLimit(int panel_hz) {
     const int hz = panel_hz <= 0 ? 60 : panel_hz;
     return hz < 60 ? hz : 60;
+}
+
+// Low-tier fps cap: half the panel rate, capped at 30; unknown panels read as 30.
+// A 60 Hz panel lands exactly on the game's 30 fixed-timestep preset.
+inline int RecommendedLowFpsLimit(int panel_hz) {
+    if (panel_hz <= 0) return 30;
+    const int half = panel_hz / 2;
+    return half < 30 ? half : 30;
 }
 
 inline const char* RecommendedRenderRes(std::uint64_t vram_bytes) {
@@ -71,13 +84,15 @@ struct Recommendation {
     int fps_limit = 60;
     const char* render_res = "1080";
     const char* temporal = "fsr1";
+    bool low_power = false;  // integrated GPU, <4 GiB VRAM, or unknown hardware
 };
 
 inline Recommendation RecommendForHardware(std::uint64_t vram_bytes, int panel_hz, bool is_rtx,
-                                           bool dlss_bridge_present) {
+                                           bool dlss_bridge_present, bool is_integrated) {
     Recommendation r;
-    r.fps_limit = RecommendedFpsLimit(panel_hz);
-    r.render_res = RecommendedRenderRes(vram_bytes);
+    r.low_power = is_integrated || vram_bytes < 4 * kGiB;
+    r.fps_limit = r.low_power ? RecommendedLowFpsLimit(panel_hz) : RecommendedFpsLimit(panel_hz);
+    r.render_res = r.low_power ? "720" : RecommendedRenderRes(vram_bytes);
     r.temporal = RecommendedTemporal(is_rtx, dlss_bridge_present);
     return r;
 }

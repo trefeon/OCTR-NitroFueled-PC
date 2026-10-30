@@ -1849,12 +1849,61 @@ void SetEnv(const wchar_t* name, const std::string& value) {
 // The GPU picker (Settings > Display; defined with the probe below).
 App::GpuDevice ParseGpuLine(const std::string& line);
 int ResolveGpuIndex(const std::vector<App::GpuDevice>& gpus, const std::string& identity);
+// The GPU the game will take: the stored identity, or the auto pick (first discrete,
+// else first listable) when set to Auto. nullptr when unknown. `entries` must outlive use.
+const App::GpuDevice* EffectiveGpu(const std::vector<App::GpuDevice>& entries,
+                                   const std::string& identity);
+std::uint64_t GpuVramBytes(const App::GpuDevice& gpu);
+std::vector<App::GpuDevice> GpuEntries(const std::vector<App::GpuDevice>& gpus);
+// Panels and game settings (defined below with the probe and the Settings tab).
+int SelectedPanelHz();
+std::string GameTemporal();
 
 bool UpdateBusy();
 
 void StartGame() {
     App& a = g_app;
     if (!a.python || a.game_running || UpdateBusy()) return;
+    // Intel integrated GPUs take the low preset for stability: fill the stability keys the
+    // player never set (an explicit choice always wins and stays), and note it once applied.
+    // The launch below saves bbport.ini, so the fill persists like a manual choice.
+    bool igp_preset = false;
+    {
+        std::vector<App::GpuDevice> entries;
+        std::string identity;
+        {
+            std::scoped_lock lock{a.mutex};
+            entries = GpuEntries(a.gpus);
+            identity = a.launcher.Get("gpu");
+        }
+        const App::GpuDevice* eff = EffectiveGpu(entries, identity);
+        if (eff && eff->vendor == "0x8086" && eff->type == "integrated") {
+            const HwRecommend::Recommendation low = HwRecommend::RecommendForHardware(
+                GpuVramBytes(*eff), SelectedPanelHz(), false, false, true);
+            const char* temporal = HwRecommend::ClampTemporalForRenderer(
+                low.temporal, a.game.Get("renderer") == "native");
+            if (a.game.Get("render_res").empty()) {
+                a.game.Set("render_res", low.render_res);
+                igp_preset = true;
+            }
+            if (a.game.Get("temporal").empty() && GameTemporal() == std::string(temporal)) {
+                a.game.Set("temporal", temporal);
+                igp_preset = true;
+            }
+            if (a.game.Get("fps_limit").empty()) {
+                a.game.Set("fps_limit", std::to_string(low.fps_limit));
+                igp_preset = true;
+            }
+            if (a.game.Get("async_pipelines").empty()) {
+                a.game.Set("async_pipelines", "1");
+                igp_preset = true;
+            }
+            if (a.game.Get("async_submit").empty()) {
+                a.game.Set("async_submit", "1");
+                igp_preset = true;
+            }
+        }
+    }
     SaveGameIni();
     SaveLauncher();
     JoinWorker();
@@ -1862,6 +1911,10 @@ void StartGame() {
         std::scoped_lock lock{a.mutex};
         a.log.clear();
         a.last_status.clear();
+    }
+    if (igp_preset) {
+        AddLog(T("GPU integrada Intel: ajuste 720p/bajo aplicado por estabilidad (cámbialo en Ajustes).",
+                 "Intel integrated GPU: 720p/low preset applied for stability (override in Settings)."));
     }
     SetEnv(L"BB_GAME_DIR", PathText(a.game_dir));
     SetEnv(L"BB_NEO", EffectiveRenderRes() != "1080" ? "1" : "0");  // the resolution picks the path
@@ -2486,6 +2539,29 @@ int ResolveGpuIndex(const std::vector<App::GpuDevice>& gpus, const std::string& 
 // Intel (0x8086) or an integrated GPU: still experimental, with a known igvk64.dll crash.
 bool GpuNeedsIgpWarning(const App::GpuDevice& gpu) {
     return gpu.vendor == "0x8086" || gpu.type == "integrated";
+}
+
+// The GPU the game will take: the stored identity matched in the picker's entries, or the
+// auto pick (first discrete, else first listable) when set to Auto. nullptr when unknown
+// (no probe data yet, or a stored card the probe no longer lists).
+const App::GpuDevice* EffectiveGpu(const std::vector<App::GpuDevice>& entries,
+                                   const std::string& identity) {
+    if (!identity.empty()) {
+        for (const auto& gpu : entries)
+            if (gpu.identity == identity) return &gpu;
+        return nullptr;
+    }
+    for (const auto& gpu : entries)
+        if (gpu.type == "discrete") return &gpu;
+    return entries.empty() ? nullptr : &entries.front();
+}
+
+// The probe's vramMiB field in bytes for the tier mapping; malformed reads as 0 (safe end).
+std::uint64_t GpuVramBytes(const App::GpuDevice& gpu) {
+    char* end = nullptr;
+    const unsigned long long mib = std::strtoull(gpu.vram.c_str(), &end, 10);
+    if (end == gpu.vram.c_str() || *end != '\0') return 0;
+    return mib * (std::uint64_t{1} << 20);
 }
 
 void StartProbe() {
@@ -3899,12 +3975,33 @@ void SettingsTab() {
 
     ImGui::SeparatorText(T("Recomendado para tu equipo", "Recommended for your hardware"));
     {
-        const DxgiAdapterInfo& gpu = DxgiAdapter();
+        // The tier follows the GPU the game will take: the picker's choice (launcher.ini gpu),
+        // or the auto pick when set to Auto. Without probe data it falls back to the DXGI
+        // adapter (VRAM tier only); unknown hardware takes the safe end.
+        std::string gpu_name;
+        std::uint64_t vram_bytes = 0;
+        bool is_integrated = false, have_gpu = false;
+        {
+            std::scoped_lock lock{a.mutex};
+            const std::vector<App::GpuDevice> entries = GpuEntries(a.gpus);
+            if (const App::GpuDevice* eff = EffectiveGpu(entries, a.launcher.Get("gpu"))) {
+                gpu_name = eff->name;
+                vram_bytes = GpuVramBytes(*eff);
+                is_integrated = eff->type == "integrated";
+                have_gpu = true;
+            }
+        }
+        const DxgiAdapterInfo& dxgi = DxgiAdapter();
+        if (!have_gpu && dxgi.ok) {
+            gpu_name = dxgi.name;
+            vram_bytes = dxgi.vram_bytes;
+            have_gpu = true;
+        }
         const int hz = SelectedPanelHz();
         const bool dlss_files = DlssBridgePresent();
-        const bool rtx = gpu.ok && HwRecommend::IsRtxName(gpu.name);
+        const bool rtx = have_gpu && HwRecommend::IsRtxName(gpu_name);
         const HwRecommend::Recommendation rec =
-            HwRecommend::RecommendForHardware(gpu.ok ? gpu.vram_bytes : 0, hz, rtx, dlss_files);
+            HwRecommend::RecommendForHardware(vram_bytes, hz, rtx, dlss_files, is_integrated);
         // Post-clamp pick, shared with ApplyHwRecommended: native+RTX advertises FSR 1, not DLSS.
         const char* temporal =
             HwRecommend::ClampTemporalForRenderer(rec.temporal, a.game.Get("renderer") == "native");
@@ -3913,16 +4010,16 @@ void SettingsTab() {
         const std::string quality = a.game.Get("dlss_quality", "auto");
         std::string upscaler = dlss ? "DLSS" : "FSR 1";
         if (dlss) upscaler += quality == "auto" ? " (auto)" : " (" + quality + ")";
-        if (gpu.ok) {
+        if (have_gpu) {
             char detected[256];
             std::snprintf(detected, sizeof detected,
                           T("Detectado: %s, %s de VRAM, pantalla de %d Hz",
                             "Detected: %s, %s VRAM, %d Hz display"),
-                          gpu.name.c_str(), FormatBytes(gpu.vram_bytes).c_str(), hz);
+                          gpu_name.c_str(), FormatBytes(vram_bytes).c_str(), hz);
             ImGui::TextWrapped("%s", detected);
         } else {
-            ImGui::TextWrapped("%s", T("GPU no detectada: se usa el ajuste seguro (720p, FSR 1).",
-                                       "GPU not detected: using the safe fallback (720p, FSR 1)."));
+            ImGui::TextWrapped("%s", T("GPU no detectada: se usa el ajuste seguro (720p, FSR 1, 30 FPS).",
+                                       "GPU not detected: using the safe fallback (720p, FSR 1, 30 FPS)."));
         }
         char applies[256];
         std::snprintf(applies, sizeof applies,
@@ -3930,15 +4027,22 @@ void SettingsTab() {
                         "Applies: %sp, %s, %d FPS, Mailbox, async on"),
                       rec.render_res, upscaler.c_str(), rec.fps_limit);
         ImGui::TextColored(kGrey, "%s", applies);
+        if (rec.low_power) {
+            ImGui::TextColored(kYellow, "%s",
+                               T("Ajuste bajo para estabilidad en gráficas integradas o con poca VRAM.",
+                                 "Low preset for stability on integrated or low-VRAM GPUs."));
+        }
         if (ImGui::Button(T("Aplicar recomendado", "Apply recommended"))) {
             ApplyHwRecommended(rec, temporal);
             a.notice = T("Ajustes recomendados aplicados.", "Recommended settings applied.");
         }
         ImGui::TextColored(kGrey, "%s",
                            T("El límite nunca pasa de 60 FPS aunque la pantalla dé más: el juego está hecho para 60 "
-                             "con el parche de 60 FPS; sin límite la lógica del juego se acelera.",
+                             "con el parche de 60 FPS; sin límite la lógica del juego se acelera. En el ajuste bajo "
+                             "(integrada o poca VRAM) el límite es la mitad de la pantalla, 30 como mucho.",
                              "The cap never exceeds 60 FPS even on faster panels: the game was built for 60 with the "
-                             "60 FPS patch; uncapped, the game logic itself speeds up."));
+                             "60 FPS patch; uncapped, the game logic itself speeds up. On the low preset "
+                             "(integrated or low VRAM) the cap is half the panel rate, 30 at most."));
     }
 
     ImGui::SeparatorText(T("Rendimiento", "Performance"));

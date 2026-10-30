@@ -441,6 +441,51 @@ def gpu_needs_igp_warning(device):
     return device["vendor"] == "0x8086" or device["type"] == "integrated"
 
 
+def is_intel_integrated(device):
+    """An Intel integrated GPU (the unfixable igvk64.dll boot crash lives here): the low
+    preset applies for stability. Dozen-on-Intel reports the same vendor and type."""
+    return device is not None and device["vendor"] == "0x8086" and device["type"] == "integrated"
+
+
+GIB = 1 << 30
+
+
+def recommended_fps_limit(panel_hz):
+    """fps cap = min(panel Hz, 60); unknown panels read as 60; never Unlimited (0)."""
+    hz = panel_hz if panel_hz > 0 else 60
+    return hz if hz < 60 else 60
+
+
+def recommended_low_fps_limit(panel_hz):
+    """Low-tier fps cap: half the panel rate, capped at 30; unknown panels read as 30."""
+    if panel_hz <= 0:
+        return 30
+    half = panel_hz // 2
+    return half if half < 30 else 30
+
+
+def recommended_render_res(vram_bytes):
+    """VRAM tiers: <4 GiB -> 720p, 4-8 GiB -> 1080p, >8 GiB -> 1440p."""
+    if vram_bytes < 4 * GIB:
+        return "720"
+    if vram_bytes <= 8 * GIB:
+        return "1080"
+    return "1440"
+
+
+def recommended_temporal(is_rtx, dlss_bridge_present):
+    """DLSS only on RTX with the bridge; FSR 1 runs on every GPU (the native renderer too)."""
+    return "dlss" if is_rtx and dlss_bridge_present else "fsr1"
+
+
+def gpu_vram_bytes(device):
+    """The probe's vramMiB field in bytes; malformed reads as 0 (the safe end)."""
+    try:
+        return int(device["vram"]) * (1 << 20)
+    except (KeyError, TypeError, ValueError):
+        return 0
+
+
 def resolve_gpu_env(identity):
     """(BB_GPU_ID value or "", log line or "") for a stored GPU identity, probed fresh."""
     if not identity:
@@ -449,6 +494,58 @@ def resolve_gpu_env(identity):
     if index is None:
         return "", f'SacredFire: GPU "{identity}" not found: using Auto (recommended)'
     return str(index), ""
+
+
+def recommend_for_hardware(vram_bytes, panel_hz, is_rtx, dlss_bridge_present, is_integrated):
+    """The tier behind the Windows launcher's "Recommended for your hardware" section
+    (launcher/windows/hw_recommend.h): the low tier (720p, FSR 1, half the panel rate
+    capped at 30) for integrated GPUs, <4 GiB VRAM, or unknown hardware; the VRAM tiers
+    above that. Linux has no panel-Hz probe, so callers pass hz <= 0 (60/30 defaults)."""
+    low_power = is_integrated or vram_bytes < 4 * GIB
+    return {
+        "fps_limit": recommended_low_fps_limit(panel_hz) if low_power
+                     else recommended_fps_limit(panel_hz),
+        "render_res": "720" if low_power else recommended_render_res(vram_bytes),
+        "temporal": recommended_temporal(is_rtx, dlss_bridge_present),
+        "low_power": low_power,
+    }
+
+
+def effective_gpu(identity, devices):
+    """The GPU the game will take: the stored identity matched in the picker entries, or the
+    auto pick (first discrete, else first listable) when set to Auto; None when unknown."""
+    entries = gpu_entries(devices)
+    if identity:
+        return next((d for d in entries if d["identity"] == identity), None)
+    for device in entries:
+        if device["type"] == "discrete":
+            return device
+    return entries[0] if entries else None
+
+
+def low_preset_fill(values, lines):
+    """Fill the stability keys a bbport.ini file never set with the low preset (720p, FSR 1,
+    30 FPS, async on); an explicit choice always wins. Returns the filled keys (also set in
+    values, for save_ini); the caller saves and logs the note."""
+    present = {line.split("=", 1)[0].strip() for line in lines
+               if "=" in line and not line.lstrip().startswith(("#", ";"))}
+    touched = []
+    if "render_res" not in present:
+        values["render_res"] = "720"
+        touched.append("render_res")
+    if "temporal" not in present and values.get("fsr3") != "1" and values.get("fsr1", "1") != "0":
+        values["temporal"] = "fsr1"
+        touched.append("temporal")
+    if "fps_limit" not in present:
+        values["fps_limit"] = "30"
+        touched.append("fps_limit")
+    if "async_pipelines" not in present:
+        values["async_pipelines"] = "1"
+        touched.append("async_pipelines")
+    if "async_submit" not in present:
+        values["async_submit"] = "1"
+        touched.append("async_submit")
+    return touched
 
 
 # --- patches: every eboot patch for CUSA13795 01.21 in the bundled patches/ and the player's
@@ -1582,6 +1679,26 @@ class LauncherWindow(Adw.ApplicationWindow):
             self.gpu_row.set_subtitle(tr("Integrated GPU: experimental — update drivers; a crash was seen in igvk64.dll with version 31.0.101.1999"))
         else:
             self.gpu_row.set_subtitle(tr("The graphics card the game uses (Auto prefers the discrete GPU)"))
+
+    def ensure_low_preset(self):
+        """Intel-iGPU stability fill before store(): absent bbport.ini lines get the low preset
+        (720p, FSR 1, 30 FPS, async on); an explicit choice always wins. Syncs the Settings rows
+        so store() persists the same values. Returns the log note or ''."""
+        device = effective_gpu(self.settings.get("gpu", ""), self.gpus)
+        if not is_intel_integrated(device):
+            return ""
+        self.ini, self.ini_lines = load_ini()
+        touched = low_preset_fill(self.ini, self.ini_lines)
+        if not touched:
+            return ""
+        for key, row, value in (("render_res", self.render_res_row, "720"),
+                                ("temporal", self.upscaler_row, "fsr1"),
+                                ("fps_limit", self.fps_limit_row, "30")):
+            if key in touched and value in row.values:
+                row.set_selected(row.values.index(value))
+        if "async_pipelines" in touched:
+            self.async_row.set_active(True)
+        return tr("Intel integrated GPU: 720p/low preset applied for stability (override in Settings).")
 
     def game_dir(self):
         return Path(self.settings["game_dir"]).expanduser()
@@ -3225,6 +3342,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         if self.process:
             self.stop_game()
             return
+        igp_note = self.ensure_low_preset()
         self.store()
         if self.ini.get("online") == "1" and not nick_ok(self.ini.get("online_name", "")):
             self.toasts.add_toast(Adw.Toast(title=tr("Online play needs your own nickname (3-16 letters, digits, _ or -; not RyuPC or Player)"),
@@ -3243,6 +3361,8 @@ class LauncherWindow(Adw.ApplicationWindow):
             return
         self.stream = Gio.DataInputStream.new(self.process.get_stdout_pipe())
         self.game_started = int(time.time())
+        if igp_note:
+            self.append_log(igp_note + "\n")
         if _LAST_GPU_NOTE:
             self.append_log(_LAST_GPU_NOTE + "\n")
         self.party, self.party_asked = None, 0.0
@@ -3396,6 +3516,12 @@ def play():
     if not (Path(settings["game_dir"]).expanduser() / "eboot.bin").is_file():
         print("SacredFire: choose the game folder in the launcher first", file=sys.stderr)
         return 1
+    if is_intel_integrated(effective_gpu(settings.get("gpu", ""), connected_gpus())):
+        ini, lines = load_ini()
+        if low_preset_fill(ini, lines):
+            save_ini(ini, lines)
+            print(tr("Intel integrated GPU: 720p/low preset applied for stability (override in Settings)."),
+                  file=sys.stderr)
     os.chdir(PORT_DIR)
     env = game_environment(settings)
     steam_shortcuts.stable_appimage_link()

@@ -120,6 +120,7 @@
  "Import…": "Importar…",
  "Internal resolution": "Resolución interna",
  "Integrated GPU: experimental — update drivers; a crash was seen in igvk64.dll with version 31.0.101.1999": "Gráfica integrada: experimental — actualiza el driver; se vio un cierre en igvk64.dll con la versión 31.0.101.1999.",
+ "Intel integrated GPU: 720p/low preset applied for stability (override in Settings).": "GPU integrada Intel: ajuste 720p/bajo aplicado por estabilidad (cámbialo en Ajustes).",
  "Invite from {}": "Invitación de {}",
  "Invite to a private match or your party: while you play online, press + in a Discord chat and choose \"Invite to play\". Whoever accepts gets you as a friend and their game starts; in it, they open Friends and join you. Both PCs need this launcher (or the Windows one) and Discord.": "Invita a una partida privada o a tu grupo: mientras juegas en línea, pulsa + en un chat de Discord y elige \"Invitar a jugar\". Quien acepte te añade como amigo y se inicia su juego; ahí abre Amigos y se une a ti. Los dos PCs necesitan este launcher (o el de Windows) y Discord.",
  "It is for the server {} and you use {}. Only switch if you trust that server: it will see your nickname and your online play.": "Es para el servidor {} y tú usas {}. Cambia solo si confías en ese servidor: verá tu apodo y tu juego en línea.",
