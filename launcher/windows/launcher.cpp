@@ -2789,6 +2789,11 @@ void PkgGuidePopup() {
         a.pkg_show_guide = false;
     }
     if (!ImGui::BeginPopupModal("pkg_guide", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        return;
+    }
     ImGui::TextUnformatted(T("Cómo preparar tus archivos PKG", "How to prepare your PKG files"));
     ImGui::Spacing();
     ImGui::SeparatorText(T("Lo que necesitas", "What you need"));
@@ -2879,6 +2884,17 @@ void PlayTab() {
     if (!a.python) {
         ImGui::TextColored(kRed, "%s", T("Falta Python 3: no se encontró python\\python.exe ni Python instalado.",
                                          "Python 3 is missing: no python\\python.exe and no installed Python."));
+    }
+    // Escape backs out of the PKG flow step by step: a running import first (same as its
+    // Cancel button), else the pending review (same as its Cancel). Never fires with a popup
+    // open (the guide handles its own Escape) or outside these two exact states.
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup)) {
+        if (a.job == Job::PkgImport) {
+            StopPkgImport();
+        } else if (!a.pkg_pending_src.empty()) {
+            a.pkg_pending_src.clear();
+            a.pkg_preflight.clear();
+        }
     }
     if (a.game_info.kind == Kind::Complete) {
         if (a.job == Job::Merge) {
