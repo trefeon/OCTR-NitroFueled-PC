@@ -1868,7 +1868,8 @@ void StartGame() {
     SetEnv(L"BB_LANGUAGE", GameLanguage());
     SetEnv(L"BB_DISPLAY", a.launcher.Get("display"));
     // The game's GPU: the stored "vendorID:name" resolved to this run's Vulkan index through
-    // a fresh --list-devices (driver updates reorder it). No match falls back to Auto.
+    // a fresh --list-devices (driver updates reorder it). The stored choice is kept in any
+    // case: no match falls back to Auto for this run only.
     {
         const std::string identity = a.launcher.Get("gpu");
         std::string gpu_id;
@@ -1888,10 +1889,10 @@ void StartGame() {
             const int index = ResolveGpuIndex(gpus, identity);
             if (index >= 0) {
                 gpu_id = std::to_string(index);
+            } else if (gpus.empty()) {
+                AddLog("GPU list unavailable: using Auto (recommended) for this run");
             } else {
-                a.launcher.Set("gpu", "");
-                SaveLauncher();
-                AddLog("GPU \"" + identity + "\" not found: using Auto (recommended)");
+                AddLog("GPU \"" + identity + "\" not found: using Auto (recommended) for this run");
             }
         }
         SetEnv(L"BB_GPU_ID", gpu_id);
@@ -2442,7 +2443,10 @@ App::GpuDevice ParseGpuLine(const std::string& line) {
         }
     }
     if (field < 6) return gpu;
-    gpu.index = std::atoi(parts[0].c_str());
+    char* end = nullptr;
+    const long number = std::strtol(parts[0].c_str(), &end, 10);
+    if (end == parts[0].c_str() || *end != '\0' || number < 0) return gpu;
+    gpu.index = int(number);
     gpu.vendor = parts[1];
     gpu.name = parts[2];
     gpu.type = parts[3];
@@ -4118,12 +4122,17 @@ void SettingsTab() {
                 picked = &gpu;
             }
         }
+        // A stored card the probe no longer lists (gone, or the probe found nothing): shown
+        // and kept until the player picks another, as in the Linux launcher.
+        const bool stale = !current.empty() && !picked;
+        if (stale) preview = current + T(" (no conectada)", " (not connected)");
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22.0f);
         if (ImGui::BeginCombo(T("GPU", "GPU"), preview.c_str())) {
             if (ImGui::Selectable(T("Automática (recomendada)", "Auto (recommended)"), current.empty())) {
                 a.launcher.Set("gpu", "");
                 SaveLauncher();
             }
+            if (stale) ImGui::Selectable(preview.c_str(), true);
             for (const auto& gpu : entries) {
                 ImGui::PushID(gpu.identity.c_str());
                 if (ImGui::Selectable(gpu.label.c_str(), gpu.identity == current)) {
