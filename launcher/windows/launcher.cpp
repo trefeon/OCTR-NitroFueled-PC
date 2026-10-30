@@ -3134,6 +3134,7 @@ void SetupWizardConfirm() {
     App& a = g_app;
     const fs::path base = a.setup_install_dir.empty() ? a.root : a.setup_install_dir;
     // games/ already ships in the ZIP (empty dir); ensure both folders when missing.
+    // A failure keeps the wizard up so Continue re-prompts (the notice stays visible).
     std::error_code ec;
     fs::create_directories(base / L"games", ec);
     const std::error_code games_error = ec;
@@ -3142,10 +3143,11 @@ void SetupWizardConfirm() {
     if (games_error || ec) {
         a.notice = T("No se pudieron crear las carpetas games/ o dlc.",
                      "Could not create the games/ or dlc/ folders.");
+        return;
     }
     // The default keeps everything next to the launcher: pkg_library_dir stays empty
     // (= <root>/games) and dlc_dir stays empty (= <root>/dlc). A custom folder persists
-    // both, and the install choice itself is recorded.
+    // both instead.
     std::error_code eq;
     bool portable = fs::equivalent(base, a.root, eq);
     if (eq) portable = base.lexically_normal() == a.root.lexically_normal();
@@ -3158,8 +3160,8 @@ void SetupWizardConfirm() {
         a.launcher.Set("pkg_library_dir", PathText(a.pkg_library_dir));
         a.launcher.Set("dlc_dir", PathText(base / L"dlc"));
     }
-    a.launcher.Set("install_dir", PathText(base));
     SaveLauncher();
+    a.setup_install_dir.clear();
     a.setup_show = false;
     a.active_page = 0;  // land on the Play tab hero card
 }
