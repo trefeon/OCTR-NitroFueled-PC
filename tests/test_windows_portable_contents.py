@@ -159,6 +159,23 @@ class WindowsPortableContents(unittest.TestCase):
                              "portable ZIP must not bundle game files")
             self.assertFalse(any(n.startswith(prefix + "CUSA") for n in names))
 
+    def test_portable_ships_empty_games_library(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, dist, dxc, clang_bin, portable_dir = _stage_source(temp)
+            archive = _run_packager(root, dist, dxc, clang_bin, portable_dir)
+            with zipfile.ZipFile(archive) as package:
+                names = set(package.namelist())
+            prefix = f"{portable.NAME}/"
+            self.assertIn(prefix + "games/", names,
+                          "portable ZIP must ship the empty default library folder")
+            self.assertFalse(any(n.startswith(prefix + "games/") and n != prefix + "games/"
+                                 for n in names),
+                             "games/ must ship empty: the first import fills it in")
+            self.assertFalse(any(n.lower().endswith(".pkg") for n in names),
+                             "portable ZIP must not bundle source PKGs")
+            self.assertFalse(any("CUSA13795" in n for n in names),
+                             "portable ZIP must not bundle game files")
+
     def test_sha256_file_matches_zip_and_checks(self):
         with tempfile.TemporaryDirectory() as temp:
             root, dist, dxc, clang_bin, portable_dir = _stage_source(temp)

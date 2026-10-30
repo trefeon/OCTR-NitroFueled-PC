@@ -253,7 +253,11 @@ def main():
     shutil.rmtree(folder, ignore_errors=True)
     if folder.exists():
         sys.exit(f'{folder} could not be removed (is it open?)')
-    for sub in ('bin', 'scripts', 'tools', 'patches', 'out', 'mods'):
+    # The default game library lives next to the launcher (games/): separate from the PKG
+    # sources, because staging uses hard links on the destination volume while the sources may
+    # sit on read-only or network media — and installing beside them would pollute the download
+    # folder with stage-*/CUSA13795-1.21/dlc. It ships empty; the first import fills it in.
+    for sub in ('bin', 'scripts', 'tools', 'patches', 'out', 'mods', 'games'):
         (folder / sub).mkdir(parents=True)
     shutil.copy2(exe, folder / 'bin')
     shutil.copy2(caps, folder / 'bin')
@@ -357,6 +361,9 @@ def main():
     archive = a.dist / f'{NAME}-windows.zip'
     archive.unlink(missing_ok=True)
     with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        # The empty default library: an explicit directory entry, since the file loop below
+        # would otherwise drop the empty folder from the package.
+        z.writestr(f'{NAME}/games/', '')
         for path in sorted(folder.rglob('*')):
             if path.is_file():  # forward slashes in the entry names, as the ZIP format asks
                 z.write(path, f'{NAME}/{path.relative_to(folder).as_posix()}')

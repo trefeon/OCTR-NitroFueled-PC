@@ -705,6 +705,16 @@ struct App {
     HANDLE pkg_import_job = nullptr;  // kills the whole importer tree on cancel
     std::vector<std::string> pkg_import_log;  // guarded by mutex
     std::string pkg_import_staging, pkg_import_merged;  // guarded by mutex
+    // Auto-import UX: a picked PKG folder awaiting inline confirm, and its scan.
+    fs::path pkg_pending_src;   // empty = no pre-flight showing
+    fs::path pkg_library_dir;   // empty = <launcher_root>/games
+    struct PkgPreflight {
+        char kind = 'x';  // 'b' base, 'u' 1.21 update, 'd' DLC, 'x' invalid
+        std::string file, role, detail;
+        bool ok = false;
+    };
+    std::vector<PkgPreflight> pkg_preflight;
+    bool pkg_show_guide = false;
     std::atomic<size_t> merge_done{0}, merge_total{0};
     std::atomic<bool> job_finished{false};
 
@@ -2143,7 +2153,7 @@ void PollJobs() {
             a.notice.clear();
             SaveLauncher();  // on failure its notice stays: the validated install is kept, path below
             if (a.notice.empty()) {
-                a.notice = std::string(T("Juego importado: ", "Game imported: ")) + merged;
+                a.notice = std::string(T("Juego listo: importado en ", "Game ready: imported at ")) + merged;
             } else {
                 a.notice += std::string(T(" El juego importado se conserva en: ",
                                           " The imported game is kept at: ")) +
@@ -2695,6 +2705,123 @@ bool CreateDesktopShortcut(std::string& out_error);
 bool AddToSteam(std::string& out_msg);
 void DrawMenuIcon(ImDrawList* d, int id, ImVec2 c, ImU32 ink, float s);
 
+// Pre-flight for the single-folder PKG import (defined with the DLC tab below).
+std::map<std::string, std::string> ReadPkgSfo(const fs::path& pkg, std::string& error);
+DlcInfo DescribeDlc(const fs::path& path);
+
+/// Every top-level *.pkg with the role the importer will give it (base / 1.21 update / DLC),
+/// reusing ReadPkgSfo/DescribeDlc. Anything else carries the reason it would fail, so the
+/// inline confirm can block Import before the engine (Job::PkgImport) ever starts.
+std::vector<App::PkgPreflight> ScanPkgFolder(const fs::path& dir) {
+    std::vector<App::PkgPreflight> out;
+    std::error_code ec;
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code e2;
+        if (!it->is_regular_file(e2)) continue;
+        const fs::path ext = it->path().extension();
+        if (ext != L".pkg" && ext != L".PKG") continue;
+        App::PkgPreflight p;
+        p.file = PathText(it->path().filename());
+        std::string problem;
+        const auto sfo = ReadPkgSfo(it->path(), problem);
+        if (!problem.empty()) {
+            p.role = T("no válido", "invalid");
+            p.detail = problem;
+        } else {
+            auto get = [&](const char* k) {
+                const auto f = sfo.find(k);
+                return f == sfo.end() ? std::string() : f->second;
+            };
+            const std::string title = get("TITLE_ID"), category = get("CATEGORY"), ver = get("APP_VER");
+            if (title != "CUSA13795") {
+                p.role = T("no válido", "invalid");
+                p.detail = std::string(T("es otro juego o región: ", "another game or region: ")) +
+                           (title.empty() ? "?" : title);
+            } else if (category == "gd") {
+                p.kind = 'b';
+                p.role = T("juego base", "base game");
+                p.detail = get("TITLE");
+                p.ok = true;
+            } else if (category == "ac") {
+                const DlcInfo d = DescribeDlc(it->path());
+                if (d.ok) {
+                    p.kind = 'd';
+                    p.role = T("DLC", "DLC");
+                    p.detail = d.title;
+                    p.ok = true;
+                } else {
+                    p.role = T("no válido", "invalid");
+                    p.detail = d.problem;
+                }
+            } else if (category == "gp" || ver == kUpdateVersion) {
+                p.kind = 'u';
+                p.role = T("actualización 1.21", "1.21 update");
+                p.detail = get("TITLE");
+                p.ok = true;
+            } else {
+                p.role = T("no válido", "invalid");
+                p.detail = std::string(T("no es base, actualización ni DLC (categoría ", "not base, update or DLC (category ")) +
+                           (category.empty() ? "?" : category) + ")";
+            }
+        }
+        out.push_back(std::move(p));
+    }
+    std::sort(out.begin(), out.end(), [](const auto& x, const auto& y) { return x.file < y.file; });
+    return out;
+}
+
+/// 'How to prepare your PKG files': what to download, what is not needed, what the importer
+/// does, and why it can fail. Opened from the hero card's button (and summarized in its (?)).
+void PkgGuidePopup() {
+    App& a = g_app;
+    if (a.pkg_show_guide) {
+        ImGui::OpenPopup("pkg_guide");
+        a.pkg_show_guide = false;
+    }
+    if (!ImGui::BeginPopupModal("pkg_guide", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+    ImGui::TextUnformatted(T("Cómo preparar tus archivos PKG", "How to prepare your PKG files"));
+    ImGui::Spacing();
+    ImGui::SeparatorText(T("Lo que necesitas", "What you need"));
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 32.0f);
+    ImGui::TextUnformatted(T("Un PKG del juego base CUSA13795, un PKG de la actualización 1.21 y, si quieres, "
+                             "PKGs de DLC del mismo CUSA13795. Los nombres de archivo dan igual: mételos todos "
+                             "en una misma carpeta.",
+                             "One CUSA13795 base-game PKG, one 1.21 update PKG and, optionally, matching CUSA13795 "
+                             "DLC PKGs. File names do not matter: put them all in a single folder."));
+    ImGui::PopTextWrapPos();
+    ImGui::SeparatorText(T("Lo que NO necesitas", "What you do NOT need"));
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 32.0f);
+    ImGui::TextUnformatted(T("Nada que extraer, renombrar o unir a mano: ni herramientas de extracción ni cambios "
+                             "de nombre. El importador lo hace todo.",
+                             "No extracting, renaming or merging by hand: no extraction tools, no renames. The "
+                             "importer does it all."));
+    ImGui::PopTextWrapPos();
+    ImGui::SeparatorText(T("Lo que hará el importador", "What the importer will do"));
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 32.0f);
+    ImGui::TextUnformatted(T("Clasifica cada PKG, los extrae en una carpeta temporal, comprueba su param.sfo, une "
+                             "la actualización sobre el juego base, solo instala si game_check lo acepta y copia "
+                             "los DLC sin extraer. Instala en la biblioteca (games/ junto al launcher), separada de "
+                             "tus PKGs: la preparación usa enlaces duros en el disco de destino y tus PKGs pueden "
+                             "estar en un medio de solo lectura o de red. Tus PKGs originales no se tocan nunca.",
+                             "It classifies each PKG, extracts them to a temporary folder, validates their "
+                             "param.sfo, merges the update over the base game, installs only if game_check accepts "
+                             "it, and copies DLC without extracting. It installs into the library (games/ next to "
+                             "the launcher), kept apart from your PKGs: staging uses hard links on the destination "
+                             "volume and your PKGs may sit on read-only or network media. Your original PKGs are "
+                             "never modified."));
+    ImGui::PopTextWrapPos();
+    ImGui::SeparatorText(T("Si falla la revisión", "If the review fails"));
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 32.0f);
+    ImGui::TextUnformatted(T("Dos bases o dos actualizaciones (sobra uno), falta la actualización 1.21, otro juego "
+                             "o región (solo vale CUSA13795) o un DLC que no es de este juego: ese DLC se omite.",
+                             "Two bases or two updates (one too many), a missing 1.21 update, another game or "
+                             "region (only CUSA13795 works), or a DLC that is not for this game: that DLC is skipped."));
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    if (ImGui::Button(T("Cerrar", "Close"))) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
 bool PrimaryPlayButton(const char* label, ImVec2 size, bool disabled) {
     const bool pressed = ImGui::InvisibleButton("##primary_play", size);
     const ImVec2 a = ImGui::GetItemRectMin();
@@ -2819,56 +2946,43 @@ void PlayTab() {
                                  "You need your own PS4 dump: the base game (CUSA14876 in Europe, CUSA13795 in the "
                                  "Americas) and the 1.21 update. If they are already merged in one folder, choose that one."));
         ImGui::PopTextWrapPos();
+        PkgGuidePopup();
         ImGui::Spacing();
-        if (ImGui::BeginTable("setup", 3, ImGuiTableFlags_SizingStretchProp)) {
-            ImGui::TableSetupColumn("what", ImGuiTableColumnFlags_WidthFixed);
-            ImGui::TableSetupColumn("state", ImGuiTableColumnFlags_WidthStretch);
-            ImGui::TableSetupColumn("button", ImGuiTableColumnFlags_WidthFixed);
-            auto row = [&](const char* what, fs::path& slot, FolderInfo& info, Kind good, const wchar_t* title, const char* id) {
-                ImGui::TableNextRow();
-                ImGui::TableNextColumn();
-                ImGui::TextUnformatted(what);
-                ImGui::TableNextColumn();
-                const bool ok = info.kind == good;
-                ImGui::TextColored(ok ? kGreen : (info.kind == Kind::Empty ? kGrey : kRed), "%s", Describe(info).c_str());
-                if (!slot.empty()) ImGui::TextColored(kGrey, "%s", PathText(slot).c_str());
-                ImGui::TableNextColumn();
-                ImGui::PushID(id);
-                if (ImGui::Button(T("Elegir...", "Choose...")) && !busy) ChooseFolder(slot, info, title);
-                ImGui::PopID();
-            };
-            row(T("Juego base", "Base game"), a.base_dir, a.base_info, Kind::Base, L"CUSA13795", "base");
-            row(T("Actualización 1.21", "Update 1.21"), a.update_dir, a.update_info, Kind::Update, L"CUSA13795-patch", "update");
-            ImGui::EndTable();
-        }
-        const bool can_merge = a.base_info.kind == Kind::Base && a.update_info.kind == Kind::Update;
-        if (a.job == Job::Merge) {
-            const size_t total = a.merge_total, done = a.merge_done;
-            const float fraction = total ? float(done) / float(total) : 0.0f;
-            char overlay[64];
-            std::snprintf(overlay, sizeof overlay, "%zu / %zu", done, total);
-            ImGui::ProgressBar(fraction, ImVec2(-FLT_MIN, 0), overlay);
-        } else {
-            ImGui::BeginDisabled(!can_merge || busy);
-            if (ImGui::Button(T("Preparar el juego (base + 1.21)", "Prepare the game (base + 1.21)"))) {
-                StartMerge({a.base_dir, a.update_dir});
+        // Hero card: the one obvious path for a fresh user. A single PKG-folder picker
+        // (remembered in launcher.ini as pkg_dir); the library defaults to <launcher_root>/games.
+        ImGui::SeparatorText(T("Importación automática (recomendado)", "Automatic import (recommended)"));
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(T("Elige la carpeta con tus PKGs: se revisan, se extraen en una carpeta temporal, se "
+                                 "comprueban y se instalan en la biblioteca; los DLC se copian sin extraer.",
+                                 "Choose the folder with your PKGs: they are scanned, extracted to a temporary "
+                                 "folder, validated and installed into the library; DLC is copied without extracting."));
+        ImGui::PopTextWrapPos();
+        ImGui::BeginDisabled(busy || !a.python);
+        if (ImGui::Button(T("Importar carpeta de PKGs...", "Import PKG folder..."))) {
+            fs::path start = TextPath(a.launcher.Get("pkg_dir"));
+            std::error_code ec;
+            if (!fs::is_directory(start, ec)) start = a.root;
+            if (const auto pkgs = PickFolder(a.hwnd, L"Carpeta con los .pkg de CUSA13795", start)) {
+                a.launcher.Set("pkg_dir", PathText(*pkgs));
+                SaveLauncher();
+                a.pkg_pending_src = *pkgs;
+                a.pkg_preflight = ScanPkgFolder(*pkgs);
             }
-            ImGui::EndDisabled();
-            if (can_merge) {
-                ImGui::SameLine();
-                ImGui::TextColored(kGrey, "%s %s", T("se crea", "creates"),
-                                   PathText(MergeTarget(a.base_dir)).c_str());
-            }
-            HelpMarker(T("Une la actualización con el juego base en una carpeta nueva usando enlaces duros: no ocupa "
-                         "espacio extra ni cambia tus carpetas originales (si están en discos distintos, se copia).",
-                         "Merges the update over the base game into a new folder with hard links: no extra disk "
-                         "space and your original folders are not changed (copied if they are on different drives)."));
         }
-        ImGui::Spacing();
-        if (ImGui::Button(T("Ya tengo el juego preparado...", "I already have the merged game...")) && !busy) {
-            ChooseFolder(a.game_dir, a.game_info, L"CUSA13795-1.21");
+        ImGui::EndDisabled();
+        HelpMarker(T("Un PKG del juego base CUSA13795, uno de la actualización 1.21 y los DLC que quieras, todos en "
+                     "una carpeta y con cualquier nombre. Pulsa «Cómo preparar…» para la guía completa.",
+                     "One CUSA13795 base-game PKG, one 1.21 update PKG and whatever DLC you want, all in one folder "
+                     "with any file names. Press 'How to prepare…' for the full guide."));
+        ImGui::SameLine();
+        if (ImGui::Button(T("Cómo preparar…", "How to prepare…"))) a.pkg_show_guide = true;
+        const fs::path pkg_library = a.pkg_library_dir.empty() ? (a.root / L"games") : a.pkg_library_dir;
+        ImGui::TextColored(kGrey, "%s %s", T("Biblioteca:", "Library:"), PathText(pkg_library).c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T("Cambiar...", "Change...")) && !busy && a.job != Job::PkgImport) {
+            if (const auto sel = PickFolder(a.hwnd, L"Biblioteca de juegos / Game library", pkg_library))
+                a.pkg_library_dir = *sel;
         }
-        ImGui::Spacing();
         if (a.job == Job::PkgImport) {
             ImGui::TextColored(kYellow, "%s", T("Importando PKGs...", "Importing PKGs..."));
             std::string last;
@@ -2878,24 +2992,119 @@ void PlayTab() {
             }
             if (!last.empty()) ImGui::TextColored(kGrey, "%s", last.c_str());
             if (ImGui::Button(T("Cancelar", "Cancel"))) StopPkgImport();
-        } else {
-            ImGui::BeginDisabled(busy || !a.python);
-            if (ImGui::Button(T("Importar carpeta de PKGs...", "Import PKG folder..."))) {
-                if (const auto pkgs =
-                        PickFolder(a.hwnd, L"Carpeta con los .pkg de CUSA13795", a.root)) {
-                    if (const auto dest =
-                            PickFolder(a.hwnd, L"Biblioteca de juegos / Game library", a.root)) {
-                        StartPkgImport(*pkgs, *dest);
+        } else if (!a.pkg_pending_src.empty()) {
+            ImGui::Spacing();
+            ImGui::SeparatorText(T("Revisar antes de importar", "Review before importing"));
+            ImGui::TextColored(kGrey, "%s", PathText(a.pkg_pending_src).c_str());
+            int bases = 0, updates = 0, bad = 0;
+            for (const auto& p : a.pkg_preflight) {
+                if (p.kind == 'b') ++bases;
+                else if (p.kind == 'u') ++updates;
+                else if (p.kind != 'd') ++bad;
+            }
+            if (a.pkg_preflight.empty()) {
+                ImGui::TextColored(kRed, "%s",
+                                   T("No hay archivos .pkg en esa carpeta.", "There are no .pkg files in that folder."));
+            } else {
+                if (ImGui::BeginTable("pkg_preflight", 3, ImGuiTableFlags_SizingStretchProp)) {
+                    ImGui::TableSetupColumn("file", ImGuiTableColumnFlags_WidthStretch);
+                    ImGui::TableSetupColumn("role", ImGuiTableColumnFlags_WidthFixed);
+                    ImGui::TableSetupColumn("detail", ImGuiTableColumnFlags_WidthStretch);
+                    for (const auto& p : a.pkg_preflight) {
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(p.file.c_str());
+                        ImGui::TableNextColumn();
+                        ImGui::TextColored(p.ok ? kGreen : kRed, "%s", p.role.c_str());
+                        ImGui::TableNextColumn();
+                        ImGui::TextColored(kGrey, "%s", p.detail.c_str());
                     }
+                    ImGui::EndTable();
                 }
             }
+            const bool preflight_ok = bases == 1 && updates == 1 && bad == 0 && !a.pkg_preflight.empty();
+            if (preflight_ok) {
+                ImGui::TextColored(kGreen, "%s",
+                                   T("Listo para importar: un juego base y la actualización 1.21.",
+                                     "Ready to import: one base game and the 1.21 update."));
+            } else {
+                ImGui::TextColored(kRed,
+                                   T("Hacen falta exactamente un juego base y una actualización 1.21 de CUSA13795 "
+                                     "(base: %d, actualización: %d). Dos bases, falta la actualización u otro "
+                                     "título o región no valen.",
+                                     "Need exactly one CUSA13795 base game and one 1.21 update "
+                                     "(base: %d, update: %d). Two bases, a missing update or another "
+                                     "title or region will not do."),
+                                   bases, updates);
+            }
+            ImGui::BeginDisabled(busy || !a.python || !preflight_ok);
+            if (ImGui::Button(T("Importar", "Import"))) {
+                std::error_code ec;
+                fs::create_directories(pkg_library, ec);
+                a.pkg_library_dir = pkg_library;
+                const fs::path src = a.pkg_pending_src;
+                a.pkg_pending_src.clear();
+                a.pkg_preflight.clear();
+                StartPkgImport(src, pkg_library);
+            }
             ImGui::EndDisabled();
-            HelpMarker(T("Importa tus PKGs de CUSA13795 (base + actualización 1.21, DLC opcionales): se extraen en "
-                         "una carpeta temporal, se comprueban y solo entonces se instalan en una carpeta nueva de "
-                         "la biblioteca. Los DLC se copian sin extraer. Puedes cancelar mientras se importan.",
-                         "Imports your CUSA13795 PKGs (base + 1.21 update, optional DLC): they are extracted to a "
-                         "temporary folder, validated, and only then installed into a new library folder. DLC is "
-                         "copied without extracting. You can cancel while importing."));
+            ImGui::SameLine();
+            if (ImGui::Button(T("Cancelar", "Cancel"))) {
+                a.pkg_pending_src.clear();
+                a.pkg_preflight.clear();
+            }
+        }
+        ImGui::Spacing();
+        if (ImGui::TreeNode(T("Configuración manual (avanzado)", "Manual setup (advanced)"))) {
+            if (ImGui::BeginTable("setup", 3, ImGuiTableFlags_SizingStretchProp)) {
+                ImGui::TableSetupColumn("what", ImGuiTableColumnFlags_WidthFixed);
+                ImGui::TableSetupColumn("state", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("button", ImGuiTableColumnFlags_WidthFixed);
+                auto row = [&](const char* what, fs::path& slot, FolderInfo& info, Kind good, const wchar_t* title, const char* id) {
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(what);
+                    ImGui::TableNextColumn();
+                    const bool ok = info.kind == good;
+                    ImGui::TextColored(ok ? kGreen : (info.kind == Kind::Empty ? kGrey : kRed), "%s", Describe(info).c_str());
+                    if (!slot.empty()) ImGui::TextColored(kGrey, "%s", PathText(slot).c_str());
+                    ImGui::TableNextColumn();
+                    ImGui::PushID(id);
+                    if (ImGui::Button(T("Elegir...", "Choose...")) && !busy) ChooseFolder(slot, info, title);
+                    ImGui::PopID();
+                };
+                row(T("Juego base", "Base game"), a.base_dir, a.base_info, Kind::Base, L"CUSA13795", "base");
+                row(T("Actualización 1.21", "Update 1.21"), a.update_dir, a.update_info, Kind::Update, L"CUSA13795-patch", "update");
+                ImGui::EndTable();
+            }
+            const bool can_merge = a.base_info.kind == Kind::Base && a.update_info.kind == Kind::Update;
+            if (a.job == Job::Merge) {
+                const size_t total = a.merge_total, done = a.merge_done;
+                const float fraction = total ? float(done) / float(total) : 0.0f;
+                char overlay[64];
+                std::snprintf(overlay, sizeof overlay, "%zu / %zu", done, total);
+                ImGui::ProgressBar(fraction, ImVec2(-FLT_MIN, 0), overlay);
+            } else {
+                ImGui::BeginDisabled(!can_merge || busy);
+                if (ImGui::Button(T("Preparar el juego (base + 1.21)", "Prepare the game (base + 1.21)"))) {
+                    StartMerge({a.base_dir, a.update_dir});
+                }
+                ImGui::EndDisabled();
+                if (can_merge) {
+                    ImGui::SameLine();
+                    ImGui::TextColored(kGrey, "%s %s", T("se crea", "creates"),
+                                       PathText(MergeTarget(a.base_dir)).c_str());
+                }
+                HelpMarker(T("Une la actualización con el juego base en una carpeta nueva usando enlaces duros: no ocupa "
+                             "espacio extra ni cambia tus carpetas originales (si están en discos distintos, se copia).",
+                             "Merges the update over the base game into a new folder with hard links: no extra disk "
+                             "space and your original folders are not changed (copied if they are on different drives)."));
+            }
+            ImGui::Spacing();
+            if (ImGui::Button(T("Ya tengo el juego preparado...", "I already have the merged game...")) && !busy) {
+                ChooseFolder(a.game_dir, a.game_info, L"CUSA13795-1.21");
+            }
+            ImGui::TreePop();
         }
     }
 
