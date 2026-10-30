@@ -7469,6 +7469,9 @@ IDXGISwapChain* g_swapchain = nullptr;
 ID3D11RenderTargetView* g_rtv = nullptr;
 UINT g_resize_w = 0, g_resize_h = 0;
 bool g_occluded = false;
+// Set when the D3D device was lost and rebuilding it failed; the loop keeps polling jobs and
+// retrying the rebuild instead of touching the dead device.
+bool g_d3d_dead = false;
 
 ID3D11ShaderResourceView* MakeTexture(const uint32_t* bgra, int width, int height) {
     D3D11_TEXTURE2D_DESC td{};
@@ -7533,6 +7536,58 @@ void CleanupDevice() {
     g_swapchain = nullptr;
     g_context = nullptr;
     g_device = nullptr;
+}
+
+// GDI fallback painted (via WM_PAINT) while the exclusive-fullscreen game keeps our swapchain
+// occluded: a solid fill plus a status line, no D3D calls. The loop throttles repaints to a
+// few Hz; the next successful Present resumes normal D3D rendering.
+void PaintOccludedFallback(HWND hwnd) {
+    PAINTSTRUCT ps{};
+    HDC hdc = BeginPaint(hwnd, &ps);
+    if (!hdc) return;
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    HBRUSH bg = CreateSolidBrush(RGB(5, 26, 61));
+    FillRect(hdc, &client, bg);
+    DeleteObject(bg);
+    const std::wstring text = Widen(T("El juego sigue en ejecución...",
+                                      "Game still running..."));
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, RGB(234, 249, 255));
+    LOGFONTW lf{};
+    lf.lfHeight = -LONG(19.0f * g_ui_scale);
+    lf.lfWeight = FW_NORMAL;
+    wcsncpy_s(lf.lfFaceName, L"Segoe UI", _TRUNCATE);
+    HFONT font = CreateFontIndirectW(&lf);
+    HGDIOBJ old = nullptr;
+    if (font) old = SelectObject(hdc, font);
+    RECT box = client;
+    const LONG third = (box.bottom - box.top) / 3;
+    box.top += third;
+    box.left += 24;
+    box.right -= 24;
+    DrawTextW(hdc, text.c_str(), -1, &box, DT_CENTER | DT_WORDBREAK);
+    if (font) {
+        SelectObject(hdc, old);
+        DeleteObject(font);
+    }
+    EndPaint(hwnd, &ps);
+}
+
+// Present can report DXGI_ERROR_DEVICE_REMOVED / DXGI_ERROR_DEVICE_RESET (driver upgrade or
+// GPU reset, e.g. while the game runs). Rebuild device, swapchain, target and backend objects;
+// artwork textures are reloaded because they reference the dead device. Returns false when D3D
+// itself is unavailable; the caller then parks on g_d3d_dead and retries later.
+bool RecreateDevice(HWND hwnd) {
+    ImGui_ImplDX11_Shutdown();
+    ReleaseArtwork();
+    CleanupDevice();
+    g_occluded = false;
+    g_resize_w = g_resize_h = 0;
+    if (!CreateDevice(hwnd)) return false;
+    ImGui_ImplDX11_Init(g_device, g_context);
+    LoadArtwork();
+    return true;
 }
 
 } // namespace
@@ -7612,6 +7667,15 @@ static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
         g_resize_w = LOWORD(lparam);
         g_resize_h = HIWORD(lparam);
         return 0;
+    case WM_PAINT:
+        // Exclusive-fullscreen game on another display: Present stays DXGI_STATUS_OCCLUDED and
+        // the D3D frame is skipped, so a restored window would sit black. Paint the cheap GDI
+        // status (the loop throttles repaints) until D3D resumes.
+        if (g_occluded && g_app.game_running) {
+            PaintOccludedFallback(hwnd);
+            return 0;
+        }
+        break;
     case WM_SYSCOMMAND:
         if ((wparam & 0xfff0) == SC_KEYMENU) return 0;
         break;
@@ -7837,6 +7901,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         RegisterDiscordLaunch(DiscordAppId());
 
     bool done = false;
+    ULONGLONG occluded_since = 0;
+    ULONGLONG occluded_last_paint = 0;
     while (!done) {
         MSG msg;
         // Idle while minimized or not in front: wait for input or 100 ms (background work).
@@ -7851,16 +7917,53 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             PollJobs();
             continue;
         }
-        if (g_occluded && g_swapchain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED) {
-            Sleep(10);
-            PollJobs();
-            continue;
+        if (g_d3d_dead) {
+            // A lost device that could not be rebuilt (D3D gone): keep the window alive on
+            // messages/jobs and retry; no D3D calls until the rebuild succeeds.
+            if (RecreateDevice(hwnd)) g_d3d_dead = false;
+            else {
+                Sleep(250);
+                PollJobs();
+                continue;
+            }
         }
-        g_occluded = false;
+        if (g_occluded) {
+            const HRESULT test = g_swapchain->Present(0, DXGI_PRESENT_TEST);
+            if (test == DXGI_STATUS_OCCLUDED) {
+                if (!occluded_since) occluded_since = GetTickCount64();
+                // The game holds the display: after ~2 s of occlusion, request a lightweight
+                // GDI repaint (a few Hz, no D3D calls) so the window shows a status instead
+                // of black. The next successful Present resumes D3D below.
+                if (g_app.game_running) {
+                    const ULONGLONG now = GetTickCount64();
+                    if (now - occluded_since > 2000 && now - occluded_last_paint > 300) {
+                        occluded_last_paint = now;
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                    }
+                }
+                Sleep(10);
+                PollJobs();
+                continue;
+            }
+            if (test == DXGI_ERROR_DEVICE_REMOVED || test == DXGI_ERROR_DEVICE_RESET) {
+                if (!RecreateDevice(hwnd)) g_d3d_dead = true;
+                occluded_since = 0;
+                occluded_last_paint = 0;
+                continue;
+            }
+            g_occluded = false;
+            occluded_since = 0;
+            occluded_last_paint = 0;
+        }
         if (g_resize_w && g_resize_h) {
             CleanupRenderTarget();
-            g_swapchain->ResizeBuffers(0, g_resize_w, g_resize_h, DXGI_FORMAT_UNKNOWN, 0);
+            const HRESULT resized =
+                g_swapchain->ResizeBuffers(0, g_resize_w, g_resize_h, DXGI_FORMAT_UNKNOWN, 0);
             g_resize_w = g_resize_h = 0;
+            if (resized == DXGI_ERROR_DEVICE_REMOVED || resized == DXGI_ERROR_DEVICE_RESET) {
+                if (!RecreateDevice(hwnd)) g_d3d_dead = true;
+                continue;
+            }
             CreateRenderTarget();
         }
         ImGui_ImplDX11_NewFrame();
@@ -7872,7 +7975,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
         g_context->ClearRenderTargetView(g_rtv, clear);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-        g_occluded = g_swapchain->Present(1, 0) == DXGI_STATUS_OCCLUDED;
+        const HRESULT presented = g_swapchain->Present(1, 0);
+        if (presented == DXGI_STATUS_OCCLUDED) g_occluded = true;
+        else if (presented == DXGI_ERROR_DEVICE_REMOVED || presented == DXGI_ERROR_DEVICE_RESET) {
+            if (!RecreateDevice(hwnd)) g_d3d_dead = true;
+        } else g_occluded = false;
     }
 
     DiscordPresence::Shutdown();
