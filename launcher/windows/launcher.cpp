@@ -4786,26 +4786,6 @@ bool ModCard(const PatchInfo& p) {
     if (!p.version.empty()) meta += "  · v" + p.version;
     if (ImGui::GetContentRegionAvail().x > ImGui::CalcTextSize(meta.c_str()).x + 12) ImGui::SameLine(0,10);
     ImGui::TextColored(ImVec4(.65f,.73f,.87f,1), "%s",meta.c_str());
-    const char* description = nullptr;
-    if (p.ini_key && std::strcmp(p.ini_key,"patch_60fps")==0)
-        description = T("Ejecuta el juego a 60 FPS. La versión 2.0 también elimina el vsync de doble búfer.",
-                        "Runs the game at 60 FPS. Version 2.0 also removes double-buffer vsync.");
-    if (p.ini_key && std::strcmp(p.ini_key,"patch_no_motion_blur")==0)
-        description = T("Desactiva el desenfoque de movimiento: el de la cámara y el de los objetos que se mueven (público, plantas).",
-                        "Turns off the motion blur: the camera's and that of moving objects (crowd, plants).");
-    const bool unlock = p.ini_key && std::strcmp(p.ini_key,"patch_unlock_all")==0;
-    if (unlock) description = T("Desbloquea el contenido que el juego concede al cumplir sus condiciones, con el interruptor de las demos E3/PAX.",
-                               "Unlocks what the game normally grants for meeting its unlock conditions, using the same switch as the E3/PAX demos.");
-    if (details && description) ImGui::TextWrapped("%s",description);
-    if (unlock && details) {
-        ImGui::Spacing();
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(.20f,.23f,.30f,1));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(10,7));
-        ImGui::BeginChild("save_warning",ImVec2(0,0),ImGuiChildFlags_AutoResizeY|ImGuiChildFlags_AlwaysUseWindowPadding);
-        ImGui::TextColored(kYellow,"%s",T("Copia antes tu partida.","Back up your save first.")); ImGui::SameLine();
-        if (ImGui::TextLink(T("Abrir Guardados", "Open Saves tab"))) g_app.active_page=6;
-        ImGui::EndChild(); ImGui::PopStyleVar(); ImGui::PopStyleColor();
-    }
     if (details && package) {
         ImGui::Spacing();
         ImGui::TextWrapped("%s", p.mod_description.empty()
@@ -4897,10 +4877,14 @@ void ModsTab() {
     App& a = g_app;
     ImGui::PushStyleColor(ImGuiCol_Text,ImVec4(.83f,.88f,.97f,1));
     ImGui::PushStyleColor(ImGuiCol_TextDisabled,ImVec4(.63f,.71f,.85f,1));
-    ModSection(T("Mods incluidos","Built-in mods"),true);
-    ImGui::Spacing();
-    for (const auto& p : a.patches) if (VisibleMod(p) && p.ini_key) ModCard(p);
-    ImGui::Dummy(ImVec2(0,14));
+    int builtin_total = 0;
+    for (const auto& p : a.patches) if (VisibleMod(p) && p.ini_key) ++builtin_total;
+    if (builtin_total > 0) {
+        ModSection(T("Mods incluidos","Built-in mods"),true);
+        ImGui::Spacing();
+        for (const auto& p : a.patches) if (VisibleMod(p) && p.ini_key) ModCard(p);
+        ImGui::Dummy(ImVec2(0,14));
+    }
     const float left=ImGui::GetCursorPosX();
     const float right=ImGui::GetWindowContentRegionMax().x;
     const float gap=ImGui::GetStyle().ItemSpacing.x;
