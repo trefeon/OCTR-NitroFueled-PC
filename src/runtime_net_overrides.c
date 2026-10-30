@@ -147,8 +147,13 @@ void net_overrides_init(void) {
     }
 }
 
+static int is_blocked_telemetry_host(const char *host) {
+    return host && (_stricmp(host, "pipes-prod-glutton.public.aws.demonware.net") == 0 ||
+                    _stricmp(host, "objectstore.prod.demonware.net") == 0);
+}
+
 const char *net_overrides_lookup(const char *host, uint16_t *port_override, int *is_http) {
-    if (!host) return NULL;
+    if (!host || is_blocked_telemetry_host(host)) return NULL;
     net_overrides_init();
 
     for (int i = 0; i < override_count; i++) {
@@ -165,29 +170,14 @@ const char *net_overrides_lookup(const char *host, uint16_t *port_override, int 
     return NULL;
 }
 
-static int str_ends_with(const char *str, const char *suffix) {
-    if (!str || !suffix) return 0;
-    size_t str_len = strlen(str);
-    size_t suf_len = strlen(suffix);
-    if (str_len < suf_len) return 0;
-    return (_stricmp(str + str_len - suf_len, suffix) == 0);
-}
-
 int net_overrides_is_allowed(const char *host) {
-    if (!host) return 0;
+    if (!host || is_blocked_telemetry_host(host)) return 0;
     net_overrides_init();
-
-    if (str_ends_with(host, "demonware.net") ||
-        str_ends_with(host, "playstation.net") ||
-        str_ends_with(host, "sonyentertainmentnetwork.com")) {
-        /* Must have an explicit override */
-        return net_overrides_lookup(host, NULL, NULL) != NULL;
-    }
 
     /* Localhost is always allowed */
     if (strcmp(host, "127.0.0.1") == 0 || _stricmp(host, "localhost") == 0) {
         return 1;
     }
 
-    return 1;
+    return net_overrides_lookup(host, NULL, NULL) != NULL;
 }

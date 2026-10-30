@@ -20,7 +20,6 @@
 #include <memory>
 #include <vector>
 #include <miniz.h>
-#include "bbport_perf.h"
 #include "bbport_settings.h"
 #include "../../src/runtime_friends.h"
 #include "../../src/runtime_net_ping.h"
@@ -1506,10 +1505,10 @@ void Menu() {
     if (ImGui::BeginTabItem(BbSettings::MenuText("Performance", "Производительность"))) {
     MenuSection(BbSettings::MenuText("Performance", "Производительность"));
     {
-        static constexpr int limits[] = {0, 30, 60, 72, 90, 120, 144, 240};
+        static constexpr int limits[] = {0, 30, 60, 72, 90, 120, 144, 165, 240};
         const char* names[] = {BbSettings::MenuText("No limit", "Без ограничения"), "30", "60",
                                BbSettings::MenuText("72 (half of 144 Hz)", "72 (половина 144 Гц)"),
-                               "90", "120", "144", "240"};
+                               "90", "120", "144", "165", "240"};
         const int current = s.fps_limit;
         int index = -1;
         for (int i = 0; i < int(std::size(limits)); ++i) {
@@ -2194,7 +2193,6 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     if (ms > 0.0f && ms < 1000.0f) {
         frame_ms_avg = frame_ms_avg == 0.0f ? ms : frame_ms_avg * 0.95f + ms * 0.05f;
     }
-    BbPerf::Frame(ms); // the performance diagnostic (bbport_perf.h)
     if (!Visible()) {
         return;
     }

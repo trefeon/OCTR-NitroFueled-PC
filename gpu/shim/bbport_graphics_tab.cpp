@@ -399,13 +399,13 @@ std::string Row(std::size_t row, bool change) {
         return text;
     }
     case 5: {
-        static const int limits[] = {30, 60, 120, 144, 240, 0};
+        static const int limits[] = {30, 60, 120, 144, 165, 240, 0};
         int limit = v.fps_limit.load(), k = 0;
-        while (k < 6 && limits[k] != limit) {
+        while (k < int(std::size(limits)) && limits[k] != limit) {
             ++k;
         }
         if (change) {
-            limit = limits[(k + 1) % 6];
+            limit = limits[(k + 1) % int(std::size(limits))];
             v.fps_limit = limit;
         }
         if (limit) {

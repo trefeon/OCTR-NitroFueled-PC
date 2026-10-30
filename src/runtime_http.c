@@ -624,6 +624,10 @@ int32_t runtime_http_send_request(int32_t req, const void *post_data, size_t siz
         runtime_net_trace("sceHttpSendRequest (offline) -> HTTP_NETWORK");
         return HTTP_NETWORK;
     }
+    if (!net_overrides_is_allowed(c->host)) {
+        runtime_net_trace("sceHttpSendRequest blocked host=%s", c->host);
+        return HTTP_NETWORK;
+    }
 
     runtime_net_trace("sceHttpSendRequest(req=%d, host=%s, target=%s:%u, path='%s', body=%zu bytes)",
                       req, c->host, c->target_ip, c->port, r->path, size);

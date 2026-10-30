@@ -17,10 +17,8 @@ void net_overrides_init(void);
  */
 const char *net_overrides_lookup(const char *host, uint16_t *port_override, int *is_http);
 
-/* Whitelist check: returns 1 if allowed, 0 if blocked.
- * Any *.demonware.net, *.playstation.net, or *.sonyentertainmentnetwork.com
- * domain MUST have an explicit override or it is blocked to prevent accidental
- * connections to production servers.
+/* Game DNS/HTTP egress: returns 1 only for localhost or explicit overrides.
+ * Unlisted hosts and known telemetry destinations are denied, even if overridden.
  */
 int net_overrides_is_allowed(const char *host);
 
