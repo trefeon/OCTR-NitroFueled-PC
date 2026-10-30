@@ -252,6 +252,22 @@ class TierTests(unittest.TestCase):
         self.assertNotIn("temporal", touched)
         self.assertNotIn("temporal", values)
 
+    def test_low_preset_ignores_comment_lines(self):
+        # M2: commented-out keys are not set; the fill still applies.
+        launcher = self.launcher
+        values, lines = {"show_fps": "0"}, ["# render_res=1080", "; temporal=fsr1", "show_fps=0"]
+        touched = launcher.low_preset_fill(values, lines)
+        self.assertIn("render_res", touched)
+        self.assertIn("temporal", touched)
+
+    def test_low_preset_detects_spaced_keys(self):
+        # M2: "key = value" spacing still counts as an explicit choice, same as save_ini.
+        launcher = self.launcher
+        values = {"render_res": "1080"}
+        lines = ["  render_res  =  1080  "]
+        touched = launcher.low_preset_fill(values, lines)
+        self.assertNotIn("render_res", touched)
+
 
 if __name__ == "__main__":
     unittest.main()

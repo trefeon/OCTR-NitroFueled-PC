@@ -1691,6 +1691,12 @@ class LauncherWindow(Adw.ApplicationWindow):
         touched = low_preset_fill(self.ini, self.ini_lines)
         if not touched:
             return ""
+        # M3: async_submit has no Settings row, so row sync below cannot carry it: save it
+        # now, before on_launch calls store(), whose load_ini() reload from disk would
+        # otherwise discard the in-memory-only fill.
+        if "async_submit" in touched:
+            save_ini(self.ini, self.ini_lines)
+            self.ini, self.ini_lines = load_ini()
         for key, row, value in (("render_res", self.render_res_row, "720"),
                                 ("temporal", self.upscaler_row, "fsr1"),
                                 ("fps_limit", self.fps_limit_row, "30")):
