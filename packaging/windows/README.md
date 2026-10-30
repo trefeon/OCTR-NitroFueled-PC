@@ -114,7 +114,9 @@ moves them).
 
 The portable defaults ship with background shader compiles and async submits on
 (`packaging/windows/portable/bbport.default.ini`):
-`async_pipelines=1` and `async_submit=1`.
+`async_pipelines=1` and `async_submit=1`. Unzipping over an existing install keeps
+that install's saved `bbport.ini` keys, so existing players stay on their current
+values until they toggle the setting or delete `bbport.ini` to regenerate defaults.
 
 - `async_submit`: queue submissions go out from the recording threads once their
   segments are recorded, instead of the GPU thread waiting for them (~65 µs
