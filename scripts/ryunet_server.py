@@ -106,6 +106,11 @@ def verify_proof(khash, method, target, header, now=None, seen=None, window=PROO
     "1.<ts>.<nonce>.<mac>", ts within `window` seconds of `now`, nonce unseen
     (replay refused when `seen` is a dict, which then records it). Returns
     (ok, reason); `reason` is for the log only, never sent to the client.
+
+    NOT thread-safe on its own: callers sharing one `seen` dict across threads
+    must hold a lock around the whole call (prune + check + insert), or two
+    requests can pass the same nonce. The server holds proof_lock (see
+    Handler._proof); single-threaded callers (tests) need none.
     """
     now = time.time() if now is None else now
     try:
@@ -219,8 +224,11 @@ class Handler(BaseHTTPRequestHandler):
     def _proof(self, khash, method=None):
         method = method or self.command
         header = self.headers.get('X-RyuNET-Proof', '')
-        return verify_proof(khash, method, self._target(), header,
-                            seen=self.server.state_lock_table)
+        # One lock around prune + check + insert: two threads must never pass
+        # the same nonce (ThreadingHTTPServer serves each request on its own).
+        with self.server.proof_lock:
+            return verify_proof(khash, method, self._target(), header,
+                                seen=self.server.state_lock_table)
 
     # -- /ryunet/theme ----------------------------------------------------
     def _theme(self):
@@ -382,7 +390,8 @@ class Handler(BaseHTTPRequestHandler):
                 'comment': query.get('comment', ''), 'at': int(time.time())})
             self.server.state.save()
         sys.stderr.write(f"report from {me} about {query.get('who', '')}: logged locally (no moderators)\n")
-        self._text(200, f"status {STATUS_WORDS['report']}\n", 'friends:report-stub')
+        # Bare word, no "status " prefix: the game reads the first token.
+        self._text(200, f"{STATUS_WORDS['report']}\n", 'friends:report-stub')
 
     # -- /ryunet/room-mode --------------------------------------------------
     def _room_mode(self):
@@ -475,6 +484,7 @@ def make_server(host, port, db, theme_config):
     server.daemon_threads = True
     server.state = LocalState(db)
     server.state_lock_table = {}
+    server.proof_lock = threading.Lock()
     server.theme_config = theme_config
     return server
 

@@ -189,7 +189,7 @@ class ServerSmokeTests(unittest.TestCase):
         qr = urllib.parse.urlencode({'name': nick, 'who': 'X', 'reason': 'cheating',
                                      'comment': 'test', 'format': 'text'})
         status, _, body = self.call('POST', f'/ryunet/report?{qr}')
-        self.assertEqual((status, body), (200, b'status logged\n'))
+        self.assertEqual((status, body), (200, b'logged\n'))
 
     def test_friends_two_sides_sync(self):
         alice, bob = 'AliceLocal', 'BobLocal'
