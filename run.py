@@ -428,7 +428,7 @@ def server_settings(host, port):
     return settings if isinstance(settings, dict) else {}
 
 
-RELEASES_API = 'https://api.github.com/repos/Ryu7w7/OCTR-NitroFueled-PC/releases/latest'
+RELEASES_API = 'https://api.github.com/repos/trefeon/OCTR-NitroFueled-PC/releases/latest'
 
 
 def parse_version(text):
