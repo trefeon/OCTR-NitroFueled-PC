@@ -654,7 +654,7 @@ bool PipelineCache::AsyncSkippable(const PipelineSelection& selection, bool indi
     // loading screens (a frame of fewer than 300 draws before this one). The pipeline must not
     // depend on the draw's vertex buffers (VK_EXT_vertex_input_dynamic_state). A size rule (the
     // scene's, the output's) missed most passes: many set a 16384 scissor.
-    // SacredFire: opt-in (BB_ASYNC_PIPELINES=1). On the Steam Deck, runs with pipelines compiling
+    // SacredFire: on by default (BB_ASYNC_PIPELINES=0 to disable). On the Steam Deck, runs with pipelines compiling
     // in the background hit the clobbered-dword bug (STATUS.md: a dword of a submitted command
     // buffer or a shader address register overwritten with 1) within 3-4 minutes in 2 of 3 cold
     // starts; runs without it did not (docs/sacredfire/11-upstream-backports.md).

@@ -110,6 +110,32 @@ patches, in the same console. Every launch is logged to `last_run.log`.
 Saves, the shader cache and `bbport.ini` go to `user/` and the repository folder (`BB_DATA_DIR`
 moves them).
 
+## Performance defaults
+
+The portable defaults ship with background shader compiles and async submits on
+(`packaging/windows/portable/bbport.default.ini`):
+`async_pipelines=1` and `async_submit=1`.
+
+- `async_submit`: queue submissions go out from the recording threads once their
+  segments are recorded, instead of the GPU thread waiting for them (~65 µs
+  each). The renderer default is on too (`BB_ASYNC_SUBMIT=0` turns it off);
+  `run.py` forwards the ini key to `BB_ASYNC_SUBMIT`. Expected effect: higher
+  steady-state FPS with no visual change. `docs/CHANGES_2026-10-06.md` measured
+  the stack that includes it (RX 7800 XT / RADV, Mesa 26, 1080p output, no FPS
+  limit): 138.7 → 143.6 FPS on the old memory model, 101 → 152–155 FPS standing
+  in Yahar'gul plus 95.5 → 115–124 FPS at a heavy ~2000-draw spot on the new one.
+- `async_pipelines`: graphics pipelines of passes drawn every frame compile on
+  worker threads while their draws go without them for a frame or two, instead
+  of the game stalling on the driver (about 18 ms a pipeline on a GTX 1060, up
+  to 1–4 s hitches in a first session). Expected effect: first-seen shader
+  hitches go away; an effect may show up a frame late instead. No steady-state
+  cost. `BB_ASYNC_PIPELINES=0` turns it off.
+
+How to measure: set `show_fps=1` in `bbport.ini` (or the in-game menu) for the
+corner counter, and capture a PresentMon session for the game process over a
+repeatable run (same spot, same duration) to compare frame-time percentiles
+with both keys at 0 versus 1.
+
 ## What is different from Linux
 
 | Linux | Windows |

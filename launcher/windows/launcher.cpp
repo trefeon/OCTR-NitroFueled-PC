@@ -3142,7 +3142,7 @@ void SettingsTab() {
                      "With the 60 FPS patch the game runs as fast as your PC allows. On a 144 Hz screen without "
                      "G-Sync/FreeSync, 72 divides the refresh evenly."));
     }
-    GameFlag("async_pipelines", T("Compilar shaders en segundo plano (experimental)", "Compile shaders in the background (experimental)"), false,
+    GameFlag("async_pipelines", T("Compilar shaders en segundo plano (experimental)", "Compile shaders in the background (experimental)"), true,
              T("Menos tirones la primera vez que aparece un efecto; a veces un efecto tarda un fotograma en verse.",
                "Fewer hitches when an effect is first seen; an effect may show up a frame late."));
 

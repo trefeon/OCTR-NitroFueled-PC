@@ -122,7 +122,7 @@ struct Values {
     /// SacredFire: graphics pipelines compiled on worker threads (BB_ASYNC_PIPELINES): a new
     /// shader no longer stops the game; a pass drawn every frame may miss a frame or two.
     /// Experimental (STATUS.md, issue #2). Applies at once. BB_ASYNC_PIPELINES overrides it.
-    std::atomic<bool> async_pipelines{false};
+    std::atomic<bool> async_pipelines{true};
     /// SacredFire: the game's 2x MSAA (G-buffer and forward passes; foliage's alpha edges need
     /// it). The dotted lines single-sample colour over the 2x depth buffer drew on NVIDIA (GitHub
     /// issues #16/#18) are fixed by truncating coverage in mixed-sample pipelines
