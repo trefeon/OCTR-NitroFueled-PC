@@ -202,11 +202,17 @@ void ApplyLauncherLanguage() {
     g_spanish = g_active_locale == "es";
 }
 
+// The PKG pre-flight scan worker renders its role strings off the UI thread: it installs
+// a snapshot of the locale taken at pick time here, so T() never reads g_active_locale
+// (written only from the UI thread) from the worker. Null everywhere except on that thread.
+thread_local const std::string* t_locale_override = nullptr;
+
 const char* T(const char* es, const char* en) {
-    if (g_active_locale == "es") return es;
-    if (g_active_locale == "en") return en;
+    const std::string& locale = t_locale_override ? *t_locale_override : g_active_locale;
+    if (locale == "es") return es;
+    if (locale == "en") return en;
     const auto& all = GeneratedLocales();
-    const auto language = all.find(g_active_locale);
+    const auto language = all.find(locale);
     if (language != all.end()) {
         const auto value = language->second.find(en);
         if (value != language->second.end()) return value->second.c_str();
@@ -2724,8 +2730,8 @@ DlcInfo DescribeDlc(const fs::path& path);
 /// One file's half of ScanPkgFolder: the role the importer will give a single PKG
 /// (base / 1.21 update / DLC), reusing ReadPkgSfo/DescribeDlc. Anything else carries the
 /// reason it would fail, so the inline confirm can block Import before the engine
-/// (Job::PkgImport) ever starts. Runs on the scan worker; role strings follow the locale
-/// active when the scan started (the language is only ever changed from the UI thread).
+/// (Job::PkgImport) ever starts. On the scan worker the role strings follow the locale
+/// snapshot StartPkgScan installs (t_locale_override), never g_active_locale directly.
 App::PkgPreflight ClassifyPkgFile(const fs::path& pkg_path) {
     App::PkgPreflight p;
     p.file = PathText(pkg_path.filename());
@@ -2820,7 +2826,9 @@ void JoinPkgScan() {
 /// gating and pre-flight table as the synchronous ScanPkgFolder above).
 void StartPkgScan(const fs::path& dir) {
     App& a = g_app;
-    if (a.pkg_scanning) {  // a re-pick mid-scan: drop the stale scan first
+    // Defensive-only: the picker is disabled while a scan runs, so this just covers a stale
+    // flag (e.g. a re-pick racing the previous scan's last frame). Drop the stale scan first.
+    if (a.pkg_scanning) {
         a.pkg_scan_cancel = true;
         JoinPkgScan();
         a.pkg_scanning = false;
@@ -2834,12 +2842,13 @@ void StartPkgScan(const fs::path& dir) {
         a.pkg_scan_result.clear();
     }
     const std::vector<fs::path> files = ListPkgFiles(dir);
+    const std::string locale = g_active_locale;  // snapshot on the UI thread for the worker
     a.pkg_scan_done = 0;
     a.pkg_scan_total = files.size();
     a.pkg_scan_cancel = false;
     a.pkg_scan_finished = false;
-    a.pkg_scanning = true;
-    a.pkg_scan_worker = std::thread([files] {
+    a.pkg_scan_worker = std::thread([files, locale] {
+        t_locale_override = &locale;
         App& app = g_app;
         std::vector<App::PkgPreflight> local;
         local.reserve(files.size());
@@ -2856,7 +2865,11 @@ void StartPkgScan(const fs::path& dir) {
         }
         // Set in both cases: a cancelled scan still needs PollPkgScan to join and clean up.
         app.pkg_scan_finished = true;
+        t_locale_override = nullptr;
     });
+    // Last: only a successfully constructed thread may show the progress row, so a throwing
+    // construction leaves the normal (empty) review instead of a stuck scan.
+    a.pkg_scanning = true;
 }
 
 /// Cancel the in-flight scan, if any: the worker drops its partial work and publishes nothing,
